@@ -103,11 +103,19 @@ Then:
 3. Select a configured agent.
 4. Review **Readiness** and choose **Launch Selected Agent**.
 
-When launch is unavailable, the footer states every current reason instead of
-leaving the disabled button unexplained: missing credential, distro, `nono`,
-selected agent executable, project selection, or a profile that was checked
-and could not be resolved. Executable checks and launches prepend
-`~/.local/bin` to the WSL `PATH`, matching common per-user installs.
+The launch area remains docked at the bottom of the window. Its named status
+banner states every current reason when launch is unavailable: missing
+credential, distro, `nono`, selected agent executable, project selection, or a
+profile that was checked and could not be resolved. The same reason is on the
+disabled button's tooltip. Agent or project selection changes refresh the
+banner immediately.
+
+The main content scrolls independently above the launch area. The initial,
+minimum, and maximum window dimensions are bounded by the current Windows work
+area in display-independent units, so display scaling or a small laptop screen
+does not make the launch status and button unreachable. Executable checks and
+launches prepend `~/.local/bin` to the WSL `PATH`, matching common per-user
+installs.
 
 **Open Folder** is intended to open Windows File Explorer directly at the
 selected Linux-native project. It constructs the selected distro's WSL UNC
@@ -115,6 +123,19 @@ path explicitly; opening Explorer itself is expected, but landing at a generic
 Explorer view is not.
 
 The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a separate Windows PowerShell console.
+
+## Static checks
+
+From the repository root, run:
+
+```text
+python3 -m unittest -v tests/test_static.py
+```
+
+These checks parse the embedded XAML and guard the responsive layout, named
+launch-status controls, direct agent/profile readiness checks, folder
+targeting, and security-sensitive defaults. They do not replace a Windows
+PowerShell 5.1/WPF/WSL runtime test.
 
 ## Credential behavior
 
@@ -138,12 +159,7 @@ permissions or runtime behavior. Validate each profile strictly, review its
 effective filesystem and network policy, and perform a real read/write launch
 test for every configured agent before deployment.
 
-The installed-pack inventory is diagnostic only. The launchpad uses the
-documented `nono list --installed` command, but an unsupported command, changed
-output, damaged lockfile, or other pack-list failure is reported as
-informational and never disables launch. Actual launch readiness is based on
-the selected profile resolving through `nono profile show`, not on parsing the
-pack list.
+Readiness checks each configured profile directly with `nono profile show`.
 
 ## Safety choices
 

@@ -1,0 +1,106 @@
+#!/usr/bin/env python3
+"""Static regression tests for the self-contained PowerShell/WPF launchpad."""
+
+from pathlib import Path
+import re
+import unittest
+import xml.etree.ElementTree as ET
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = (ROOT / "Nono-Launchpad.ps1").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
+XAML_MATCH = re.search(r"\[xml\]\$xaml = @'\n(.*?)\n'@", SCRIPT, re.S)
+
+
+class LaunchpadStaticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        if XAML_MATCH is None:
+            raise AssertionError("embedded XAML here-string not found")
+        cls.xaml_text = XAML_MATCH.group(1)
+        cls.xaml = ET.fromstring(cls.xaml_text)
+        cls.wpf = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
+        cls.xname = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+
+    def test_xaml_has_scrollable_content_and_docked_launch_area(self):
+        dock = self.xaml.find(f"{self.wpf}DockPanel")
+        self.assertIsNotNone(dock)
+        children = list(dock)
+        self.assertEqual(children[0].tag, f"{self.wpf}Border")
+        self.assertEqual(children[0].attrib[self.xname], "LaunchStatusArea")
+        self.assertEqual(children[0].attrib["DockPanel.Dock"], "Bottom")
+        self.assertEqual(children[1].tag, f"{self.wpf}ScrollViewer")
+        self.assertEqual(children[1].attrib[self.xname], "MainScrollViewer")
+        self.assertEqual(children[1].attrib["VerticalScrollBarVisibility"], "Auto")
+
+    def test_launch_status_controls_are_named_and_footer_is_removed(self):
+        names = {element.attrib.get(self.xname) for element in self.xaml.iter()}
+        self.assertTrue(
+            {"LaunchStatusArea", "LaunchStatusBanner", "LaunchStatusText", "LaunchButton"}
+            <= names
+        )
+        self.assertNotIn("FooterText", names)
+        self.assertIn("TextWrapping", next(
+            element.attrib
+            for element in self.xaml.iter()
+            if element.attrib.get(self.xname) == "LaunchStatusText"
+        ))
+
+    def test_window_is_bounded_to_windows_work_area(self):
+        self.assertNotIn("MinHeight", self.xaml.attrib)
+        self.assertNotIn("MinWidth", self.xaml.attrib)
+        for marker in (
+            "$workArea = [System.Windows.SystemParameters]::WorkArea",
+            "$window.MaxHeight = $workArea.Height",
+            "$window.MaxWidth = $workArea.Width",
+            "$window.MinHeight = [Math]::Min(420.0, $workArea.Height)",
+            "$window.MinWidth = [Math]::Min(640.0, $workArea.Width)",
+            "$window.Height = [Math]::Min(680.0, $workArea.Height)",
+            "$window.Width = [Math]::Min(880.0, $workArea.Width)",
+        ):
+            self.assertIn(marker, SCRIPT)
+
+    def test_pack_inventory_is_absent(self):
+        combined = SCRIPT + "\n" + README
+        for marker in (
+            "nono list --installed",
+            "Installed nono packs",
+            "Pack inventory",
+            "pack_output",
+        ):
+            self.assertNotIn(marker, combined)
+
+    def test_launch_reasons_are_visible_nonblank_and_reactive(self):
+        self.assertIn('$LaunchStatusText.Text = "Launch unavailable: $reasonText"', SCRIPT)
+        self.assertIn("$LaunchButton.ToolTip = $reasonText", SCRIPT)
+        self.assertIn("Where-Object { -not [string]::IsNullOrWhiteSpace", SCRIPT)
+        self.assertIn("readiness checks have not completed", SCRIPT)
+        self.assertIn("$ProjectCombo.Add_SelectionChanged({ Update-ControlState })", SCRIPT)
+        self.assertIn("$AgentCombo.Add_SelectionChanged({ Update-ControlState })", SCRIPT)
+        for reason in (
+            "save $($Config.CredentialVariable)",
+            "WSL distro '$($Config.Distro)' is unavailable",
+            "nono executable is unavailable",
+            "select a configured agent",
+            "agent executable",
+            "select a project",
+            "profile '",
+        ):
+            self.assertIn(reason, SCRIPT)
+
+    def test_agent_and_profile_readiness_remain_direct(self):
+        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
+        self.assertIn("command -v $commandLiteral", SCRIPT)
+        self.assertIn("nono profile show $profileLiteral --json", SCRIPT)
+        self.assertIn("$LaunchButton.IsEnabled = $reasons.Count -eq 0", SCRIPT)
+
+    def test_security_and_folder_invariants_remain(self):
+        self.assertGreaterEqual(SCRIPT.count("NonoArguments = @()"), 3)
+        self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
+        self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
+        self.assertIn('$linuxPaths = @(Invoke-WslText', SCRIPT)
+        self.assertIn('"\\\\wsl.localhost\\$($Config.Distro)"', SCRIPT)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

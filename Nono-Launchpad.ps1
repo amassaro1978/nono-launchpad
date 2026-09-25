@@ -290,7 +290,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Nono Launchpad" Height="680" Width="880"
-        MinHeight="620" MinWidth="800" WindowStartupLocation="CenterScreen"
+        WindowStartupLocation="CenterScreen"
         Background="#F3F6FA" FontFamily="Segoe UI" FontSize="13"
         SnapsToDevicePixels="True" UseLayoutRounding="True">
   <Window.Resources>
@@ -388,7 +388,34 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
     </Style>
   </Window.Resources>
 
-  <Grid Margin="24,20,24,22">
+  <DockPanel LastChildFill="True">
+    <Border x:Name="LaunchStatusArea" DockPanel.Dock="Bottom"
+            Background="#F3F6FA" BorderBrush="{StaticResource LineBrush}"
+            BorderThickness="0,1,0,0" Padding="24,14">
+      <Grid>
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="*"/>
+          <ColumnDefinition Width="18"/>
+          <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+        <Border x:Name="LaunchStatusBanner" Grid.Column="0" Background="#FFF4E5"
+                BorderBrush="#E5C07B" BorderThickness="1" CornerRadius="6"
+                Padding="11,8" VerticalAlignment="Center">
+          <StackPanel>
+            <TextBlock Text="Launch status" FontWeight="SemiBold"
+                       Foreground="{StaticResource InkBrush}" FontSize="12"/>
+            <TextBlock x:Name="LaunchStatusText" TextWrapping="Wrap"
+                       Margin="0,2,0,0" Foreground="#7A4B00" FontSize="12"/>
+          </StackPanel>
+        </Border>
+        <Button x:Name="LaunchButton" Grid.Column="2" Content="Launch Selected Agent"
+                Style="{StaticResource PrimaryButtonStyle}" VerticalAlignment="Center"/>
+      </Grid>
+    </Border>
+
+    <ScrollViewer x:Name="MainScrollViewer" VerticalScrollBarVisibility="Auto"
+                  HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
+      <Grid Margin="24,20,24,22">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="14"/>
@@ -396,8 +423,6 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
       <RowDefinition Height="14"/>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="14"/>
-      <RowDefinition Height="*"/>
-      <RowDefinition Height="18"/>
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
 
@@ -502,6 +527,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
                   Width="104" HorizontalAlignment="Right" VerticalAlignment="Center"/>
         </Grid>
         <TextBox x:Name="StatusText" Grid.Row="2" IsReadOnly="True"
+                 Height="145"
                  TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
                  HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top"
                  Background="{StaticResource FieldBrush}" BorderBrush="#D5DEE8"
@@ -514,20 +540,23 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
       </Grid>
     </Border>
 
-    <Grid Grid.Row="8">
-      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-      <TextBlock x:Name="FooterText" VerticalAlignment="Center" TextWrapping="Wrap"
-                 Margin="0,0,18,0" Foreground="{StaticResource MutedBrush}" FontSize="12"/>
-      <Button x:Name="LaunchButton" Grid.Column="1" Content="Launch Selected Agent"
-              Style="{StaticResource PrimaryButtonStyle}"/>
-    </Grid>
-  </Grid>
+      </Grid>
+    </ScrollViewer>
+  </DockPanel>
 </Window>
 '@
 
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$names = @('CredentialHeading','CredentialStatus','SetKeyButton','RefreshButton','ProjectCombo','CreateButton','NewProjectText','AgentCombo','OpenFolderButton','OpenShellButton','CheckButton','StatusText','FooterText','LaunchButton')
+$workArea = [System.Windows.SystemParameters]::WorkArea
+$window.MaxHeight = $workArea.Height
+$window.MaxWidth = $workArea.Width
+$window.MinHeight = [Math]::Min(420.0, $workArea.Height)
+$window.MinWidth = [Math]::Min(640.0, $workArea.Width)
+$window.Height = [Math]::Min(680.0, $workArea.Height)
+$window.Width = [Math]::Min(880.0, $workArea.Width)
+
+$names = @('CredentialHeading','CredentialStatus','SetKeyButton','RefreshButton','ProjectCombo','CreateButton','NewProjectText','AgentCombo','OpenFolderButton','OpenShellButton','CheckButton','StatusText','LaunchStatusArea','LaunchStatusBanner','LaunchStatusText','LaunchButton','MainScrollViewer')
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
 $script:Readiness = @{ Distro = $false; Nono = $false; Agents = @{}; Profiles = @{} }
@@ -576,12 +605,19 @@ function Update-ControlState {
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
     $CredentialStatus.Foreground = if ($keyOk) { '#1E8449' } else { '#B03A2E' }
     if ($LaunchButton.IsEnabled) {
-        $FooterText.Text = "Ready to launch.   WSL: $($Config.Distro)   |   Projects: ~/$($Config.ProjectRoot)"
-        $LaunchButton.ToolTip = $null
+        $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
+        $LaunchStatusBanner.Background = '#EAF7EF'
+        $LaunchStatusBanner.BorderBrush = '#9AC9AA'
+        $LaunchStatusText.Foreground = '#176B3A'
+        $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
     }
     else {
-        $reasonText = $reasons -join '; '
-        $FooterText.Text = "Launch unavailable: $reasonText"
+        $reasonText = @($reasons | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
+        if ([string]::IsNullOrWhiteSpace($reasonText)) { $reasonText = 'readiness checks have not completed' }
+        $LaunchStatusText.Text = "Launch unavailable: $reasonText"
+        $LaunchStatusBanner.Background = '#FFF4E5'
+        $LaunchStatusBanner.BorderBrush = '#E5C07B'
+        $LaunchStatusText.Foreground = '#7A4B00'
         $LaunchButton.ToolTip = $reasonText
     }
 }
@@ -655,27 +691,6 @@ function Refresh-Readiness {
                 }
             }
 
-            $lines.Add('')
-            $lines.Add('Installed nono packs (informational only; never blocks launch):')
-            try {
-                $packResult = Invoke-WslText -LinuxScript 'export PATH="$HOME/.local/bin:$PATH"; pack_output=$(nono list --installed 2>&1); pack_exit=$?; printf "__NONO_PACK_EXIT__=%s\n" "$pack_exit"; if [ -n "$pack_output" ]; then printf "%s\n" "$pack_output"; fi; exit 0'
-                $packExit = $null
-                $packOutput = New-Object System.Collections.Generic.List[string]
-                foreach ($line in $packResult) {
-                    if ($line -match '^__NONO_PACK_EXIT__=([0-9]+)$') { $packExit = [int]$Matches[1] }
-                    else { $packOutput.Add($line) }
-                }
-                if ($packExit -eq 0) {
-                    if ($packOutput.Count -gt 0) { foreach ($line in $packOutput) { $lines.Add($line) } }
-                    else { $lines.Add('(none reported)') }
-                }
-                else {
-                    $lines.Add("Pack inventory query unavailable (exit $packExit); launch readiness is unaffected.")
-                }
-            }
-            catch {
-                $lines.Add('Pack inventory query unavailable; launch readiness is unaffected.')
-            }
         }
         catch { $lines.Add("Readiness check failed: $($_.Exception.Message)") }
     }
