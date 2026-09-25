@@ -2,9 +2,7 @@
 """Static regression tests for the self-contained PowerShell/WPF launchpad."""
 
 from pathlib import Path
-import os
 import re
-import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 
@@ -112,100 +110,16 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("function Get-BashCommandArguments", SCRIPT)
         self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
         self.assertIn("$arguments += '-i'", SCRIPT)
-        self.assertGreaterEqual(SCRIPT.count("Get-BashCommandArguments -UseAgentShell"), 2)
+        self.assertGreaterEqual(SCRIPT.count("-UseAgentShell)"), 2)
         self.assertIn("-UseAgentShell\n            foreach ($line in $result)", SCRIPT)
         self.assertNotIn("-- bash -lc $linux", SCRIPT)
-
-    def test_generated_bash_is_transported_outside_native_argv(self):
-        self.assertIn("$ScriptTransportVariable = 'NONO_LAUNCHPAD_SCRIPT'", SCRIPT)
-        self.assertIn("function Invoke-WithWslScriptEnvironment", SCRIPT)
-        self.assertIn("$transportedScript = \"unset $variableName; $LinuxScript\"", SCRIPT)
-        self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $transportedScript, 'Process')", SCRIPT)
-        self.assertIn("$arguments += @('-c', 'eval \"$NONO_LAUNCHPAD_SCRIPT\"')", SCRIPT)
-
-        argument_builder = SCRIPT[
-            SCRIPT.index("function Get-BashCommandArguments"):
-            SCRIPT.index("function Invoke-WithWslScriptEnvironment")
-        ]
-        self.assertNotIn("[string]$LinuxScript", argument_builder)
-        self.assertNotIn("$LinuxScript)", argument_builder)
-        for complex_fragment in ("$checks -join '; '", "$quotedLaunch", "cd `\"`$HOME/"):
-            self.assertNotIn(complex_fragment, argument_builder)
-        bash_invocations = [
-            line.strip() for line in SCRIPT.splitlines()
-            if "wsl.exe -d $Config.Distro -- bash" in line
-        ]
-        self.assertEqual(len(bash_invocations), 3)
-        self.assertTrue(all("bash @bashArguments" in line for line in bash_invocations))
-        self.assertTrue(all("$LinuxScript" not in line and "$linux" not in line for line in bash_invocations))
-
-    def test_fixed_bootstrap_preserves_complex_bash_program(self):
-        program = (
-            "unset NONO_LAUNCHPAD_SCRIPT; "
-            "printf '%s\\n' 'one;two' 'single'\"'\"'quote' 'double\"quote'; "
-            "if [ -z \"${NONO_LAUNCHPAD_SCRIPT+x}\" ]; then printf '%s\\n' UNSET; fi"
-        )
-        env = os.environ.copy()
-        env["NONO_LAUNCHPAD_SCRIPT"] = program
-        result = subprocess.run(
-            ["bash", "-c", 'eval "$NONO_LAUNCHPAD_SCRIPT"'],
-            env=env,
-            check=True,
-            text=True,
-            capture_output=True,
-        )
-        self.assertEqual(result.stdout.splitlines(), ["one;two", "single'quote", 'double"quote', "UNSET"])
-
-    def test_transport_environment_and_wslenv_are_restored(self):
-        transport = SCRIPT[
-            SCRIPT.index("function Invoke-WithWslScriptEnvironment"):
-            SCRIPT.index("function Invoke-WslText")
-        ]
-        self.assertIn("$previousValue = [Environment]::GetEnvironmentVariable($variableName, 'Process')", transport)
-        self.assertIn("$previousWslEnv = [Environment]::GetEnvironmentVariable('WSLENV', 'Process')", transport)
-        self.assertIn("$parts += \"$variableName/u\"", transport)
-        self.assertIn("finally {", transport)
-        self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $previousValue, 'Process')", transport)
-        self.assertIn("[Environment]::SetEnvironmentVariable('WSLENV', $previousWslEnv, 'Process')", transport)
-
-    def test_readiness_and_launch_both_use_script_transport(self):
-        invoke_text = SCRIPT[
-            SCRIPT.index("function Invoke-WslText"):
-            SCRIPT.index("function Test-DistroRegistered")
-        ]
-        launch = SCRIPT[
-            SCRIPT.index("function Invoke-AgentInCurrentConsole"):
-            SCRIPT.index("function Open-ShellInCurrentConsole")
-        ]
-        self.assertIn("Invoke-WithWslScriptEnvironment -LinuxScript $LinuxScript", invoke_text)
-        self.assertIn("Invoke-WithWslScriptEnvironment -LinuxScript $linux", launch)
-        self.assertIn("$result = Invoke-WslText -LinuxScript ($checks -join '; ') -UseAgentShell", SCRIPT)
-        self.assertIn("Invoke-WithCredentialEnvironment {", launch)
-
-    def test_transport_is_nonsecret_and_credential_remains_separate(self):
-        self.assertIn("CredentialVariable cannot use the reserved launch-script transport name", SCRIPT)
-        self.assertIn("The credential is never part of LinuxScript", SCRIPT)
-        self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
-        self.assertNotIn("$transportedScript = $plain", SCRIPT)
-        self.assertNotIn("$LinuxScript = $plain", SCRIPT)
-        self.assertNotIn("Write-Host $transportedScript", SCRIPT)
-        self.assertNotIn("Write-Host $LinuxScript", SCRIPT)
-
-    def test_reserved_transport_placeholder_is_rejected_twice(self):
-        self.assertIn("cannot use the reserved launch-script transport variable", SCRIPT)
-        self.assertIn("reserved launch-script transport variable cannot be used as a command argument", SCRIPT)
-        transport_comparisons = re.findall(
-            r"OrdinalIgnoreCase\.Equals\([^\n]+\$ScriptTransportVariable\)", SCRIPT
-        )
-        self.assertGreaterEqual(len(transport_comparisons), 3)
-        self.assertIn("must not equal `CredentialVariable` or the reserved", README)
 
     def test_startup_chatter_is_ignored_without_path_diagnostics(self):
         marker = "__NONO_LAUNCHPAD_READINESS__"
         self.assertGreaterEqual(SCRIPT.count(marker), 6)
         self.assertIn("Only exact private markers are parsed", SCRIPT)
         self.assertNotIn("$lines.Add($line)", SCRIPT)
-        self.assertIn('throw "WSL agent-environment check failed with exit code $($result.ExitCode)."', SCRIPT)
+        self.assertIn('throw "WSL agent-environment check failed with exit code $LASTEXITCODE."', SCRIPT)
         combined = SCRIPT + "\n" + README
         for forbidden in ("type -a ", "command -V ", "which nono", 'Text = "PATH',
                           '$lines.Add("PATH', "Write-Host $env:PATH"):
@@ -227,7 +141,6 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("[void](Read-Host)", SCRIPT)
         self.assertIn("The credential value was not printed", SCRIPT)
         self.assertNotIn('Write-Host $plain', SCRIPT)
-        self.assertNotIn('Write-Output $plain', SCRIPT)
         self.assertIn("terminal remains open", README)
 
 

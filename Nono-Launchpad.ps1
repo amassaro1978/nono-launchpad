@@ -30,11 +30,6 @@ param(
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
-# Non-secret transport used to keep generated Bash programs out of WinPS 5.1's
-# native-process argument serialization. Its value exists only in this process
-# tree and is imported by WSL for the duration of each invocation.
-$ScriptTransportVariable = 'NONO_LAUNCHPAD_SCRIPT'
-
 # =========================== EDIT SETTINGS HERE ==============================
 # CredentialVariable is the *actual* environment-variable name expected by the
 # agents/proxy. PROXY_API_KEY is only a configurable default; replace it here.
@@ -96,9 +91,6 @@ function Assert-Configuration {
     if ($Config.ProjectRoot -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Unsafe ProjectRoot setting.' }
     if ($Config.UseInteractiveAgentShell -isnot [bool]) { throw 'UseInteractiveAgentShell must be true or false.' }
     if ($Config.CredentialVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'CredentialVariable must be a valid environment-variable name.' }
-    if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$Config.CredentialVariable, $ScriptTransportVariable)) {
-        throw 'CredentialVariable cannot use the reserved launch-script transport name.'
-    }
     if ($Config.Agents.Count -lt 1) { throw 'Configure at least one agent.' }
 
     foreach ($entry in $Config.Agents.GetEnumerator()) {
@@ -118,9 +110,6 @@ function Assert-Configuration {
             if ($placeholder.Success -and [StringComparer]::OrdinalIgnoreCase.Equals($placeholder.Groups[1].Value, [string]$Config.CredentialVariable)) {
                 throw "Agent '$($entry.Key)' cannot expand the configured credential into a command argument."
             }
-            if ($placeholder.Success -and [StringComparer]::OrdinalIgnoreCase.Equals($placeholder.Groups[1].Value, $ScriptTransportVariable)) {
-                throw "Agent '$($entry.Key)' cannot use the reserved launch-script transport variable."
-            }
         }
     }
 }
@@ -138,9 +127,6 @@ function ConvertTo-BashArgument {
         $variableName = $placeholder.Groups[1].Value
         if ([StringComparer]::OrdinalIgnoreCase.Equals($variableName, [string]$Config.CredentialVariable)) {
             throw 'The configured credential cannot be expanded into a command argument.'
-        }
-        if ([StringComparer]::OrdinalIgnoreCase.Equals($variableName, $ScriptTransportVariable)) {
-            throw 'The reserved launch-script transport variable cannot be used as a command argument.'
         }
         # Expand only a validated non-credential variable; quotes preserve one argument.
         return '"${' + $variableName + '}"'
@@ -167,46 +153,13 @@ function Test-ProjectName {
 
 function Get-BashCommandArguments {
     param(
+        [Parameter(Mandatory)][string]$LinuxScript,
         [switch]$UseAgentShell
     )
     $arguments = @('-l')
     if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $arguments += '-i' }
-    # Keep the native argv fixed and simple. The generated program is imported
-    # through WSLENV, then removes its transport variable before doing any work.
-    $arguments += @('-c', 'eval "$NONO_LAUNCHPAD_SCRIPT"')
+    $arguments += @('-c', $LinuxScript)
     return $arguments
-}
-
-function Invoke-WithWslScriptEnvironment {
-    param(
-        [Parameter(Mandatory)][AllowEmptyString()][string]$LinuxScript,
-        [Parameter(Mandatory)][scriptblock]$Action
-    )
-
-    $variableName = $ScriptTransportVariable
-    $previousValue = [Environment]::GetEnvironmentVariable($variableName, 'Process')
-    $previousWslEnv = [Environment]::GetEnvironmentVariable('WSLENV', 'Process')
-
-    try {
-        # The credential is never part of LinuxScript. Prefixing the non-secret
-        # program makes the transport value disappear before a final exec.
-        $transportedScript = "unset $variableName; $LinuxScript"
-        [Environment]::SetEnvironmentVariable($variableName, $transportedScript, 'Process')
-
-        $parts = @()
-        $variablePattern = '^' + [regex]::Escape($variableName) + '(?:/.*)?$'
-        if (-not [string]::IsNullOrWhiteSpace($previousWslEnv)) {
-            $parts = @($previousWslEnv -split ':' | Where-Object { $_ -and $_ -notmatch $variablePattern })
-        }
-        $parts += "$variableName/u"
-        [Environment]::SetEnvironmentVariable('WSLENV', ($parts -join ':'), 'Process')
-
-        & $Action
-    }
-    finally {
-        [Environment]::SetEnvironmentVariable($variableName, $previousValue, 'Process')
-        [Environment]::SetEnvironmentVariable('WSLENV', $previousWslEnv, 'Process')
-    }
 }
 
 function Invoke-WslText {
@@ -214,18 +167,15 @@ function Invoke-WslText {
         [Parameter(Mandatory)][string]$LinuxScript,
         [switch]$UseAgentShell
     )
-    $bashArguments = @(Get-BashCommandArguments -UseAgentShell:$UseAgentShell)
-    $result = Invoke-WithWslScriptEnvironment -LinuxScript $LinuxScript -Action {
-        $commandOutput = @(& wsl.exe -d $Config.Distro -- bash @bashArguments 2>&1)
-        [pscustomobject]@{ Output = $commandOutput; ExitCode = $LASTEXITCODE }
-    }
-    if ($result.ExitCode -ne 0) {
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $LinuxScript -UseAgentShell:$UseAgentShell)
+    $output = & wsl.exe -d $Config.Distro -- bash @bashArguments 2>&1
+    if ($LASTEXITCODE -ne 0) {
         if ($UseAgentShell) {
-            throw "WSL agent-environment check failed with exit code $($result.ExitCode)."
+            throw "WSL agent-environment check failed with exit code $LASTEXITCODE."
         }
-        throw (($result.Output | Out-String).Trim())
+        throw (($output | Out-String).Trim())
     }
-    return @(($result.Output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })
+    return @(($output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })
 }
 
 function Test-DistroRegistered {
@@ -321,18 +271,15 @@ function Invoke-AgentInCurrentConsole {
     # are single-quoted. Exact {ENV:NAME} items become validated, double-quoted
     # runtime expansions. The credential arrives only through the environment.
     $linux = "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd `"`$HOME/$root/$ProjectName`" || exit 20; exec $quotedLaunch"
-    $bashArguments = @(Get-BashCommandArguments -UseAgentShell)
-    $processState = @{ ExitCode = 0 }
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
 
     Invoke-WithCredentialEnvironment {
         Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
         Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
         Write-Host ''
-        Invoke-WithWslScriptEnvironment -LinuxScript $linux -Action {
-            & wsl.exe -d $Config.Distro -- bash @bashArguments
-            $processState.ExitCode = $LASTEXITCODE
-        }
-        if ($processState.ExitCode -ne 0) { throw "The sandboxed agent exited with code $($processState.ExitCode)." }
+        & wsl.exe -d $Config.Distro -- bash @bashArguments
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
     }
 }
 
@@ -347,10 +294,8 @@ function Open-ShellInCurrentConsole {
         if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
         $linux = "cd `"`$HOME/$root/$ProjectName`" || exit 20; exec bash -l"
     }
-    $bashArguments = @(Get-BashCommandArguments -UseAgentShell)
-    Invoke-WithWslScriptEnvironment -LinuxScript $linux -Action {
-        & wsl.exe -d $Config.Distro -- bash @bashArguments
-    }
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
+    & wsl.exe -d $Config.Distro -- bash @bashArguments
 }
 
 if ($Mode -eq 'Launch') {
