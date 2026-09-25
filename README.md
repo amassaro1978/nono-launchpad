@@ -1,0 +1,136 @@
+# Nono Launchpad
+
+`Nono-Launchpad.ps1` is a compact Windows PowerShell 5.1/WPF launchpad for WSL. It:
+
+- stores the configured credential as a Windows DPAPI CurrentUser-encrypted blob;
+- injects it only into the launched process tree through a configurable environment-variable name;
+- creates and lists projects under `~/projects` in the WSL distro's native filesystem;
+- opens a selected project in File Explorer or a Linux shell;
+- dynamically generates its agent list and readiness checks from one configuration mapping;
+- supports separately quoted custom nono options and agent arguments without enabling any by default.
+
+## Edit settings here
+
+Near the top of `Nono-Launchpad.ps1`, find:
+
+```text
+EDIT SETTINGS HERE
+```
+
+All expected launchpad configuration is in that block.
+
+### Credential variable
+
+`PROXY_API_KEY` is only a placeholder default. Replace it with the actual environment-variable **name** when confirmed. Never place a credential value in the script.
+
+```powershell
+CredentialVariable = 'PROXY_API_KEY'
+```
+
+The GUI, status text, process environment, and `WSLENV` injection all derive from this setting.
+
+The encrypted value is stored at:
+
+```text
+%LOCALAPPDATA%\NonoLaunchpad\credential.dpapi
+```
+
+### Configurable agent defaults
+
+The included mappings are configurable defaults for common signed registry profiles. Validate every profile name or path in the target environment before use.
+
+```powershell
+'Claude Code' = @{
+    Profile = 'nolabs-ai/claude'
+    Command = 'claude'
+    NonoArguments = @()
+    AgentArguments = @()
+}
+```
+
+All included agents intentionally begin with empty `NonoArguments` and `AgentArguments`. No project-access, domain, model, or other runtime option is assumed.
+
+Add or remove future agents only under `Config.Agents`. The GUI and readiness checks update automatically; no XAML or event-handler changes are required.
+
+### Optional arguments
+
+Each array element represents one argument. Keep separate arguments as separate array items.
+
+Neutral example only:
+
+```powershell
+NonoArguments = @('--option-name', '{ENV:SERVICE_HOST}')
+AgentArguments = @('--agent-option', 'example value')
+```
+
+Ordinary items are POSIX single-quoted. To intentionally expand an environment-backed argument, use the exact placeholder form:
+
+```text
+{ENV:VARIABLE_NAME}
+```
+
+The variable name is validated and rendered as one double-quoted Bash expansion:
+
+```text
+{ENV:SERVICE_HOST}  ->  "${SERVICE_HOST}"
+```
+
+A plain `$SERVICE_HOST` item remains literal text and does not expand. The named variable must already exist in the WSL launch environment; the placeholder does not store or create its value.
+
+The placeholder name must not equal `CredentialVariable`, case-insensitively. The launchpad rejects that configuration during startup and checks again during argument conversion. This prevents the stored credential from being expanded into command-line arguments where process inspection could expose it.
+
+## Start the launchpad
+
+Inspect the script before running it. If Windows marked a trusted downloaded copy as blocked, remove that mark only after inspection:
+
+```powershell
+Get-Content .\Nono-Launchpad.ps1
+Unblock-File -LiteralPath .\Nono-Launchpad.ps1
+```
+
+Then run it under Windows PowerShell 5.1 without changing execution policy:
+
+```powershell
+powershell.exe -NoProfile -STA -File .\Nono-Launchpad.ps1
+```
+
+If organizational policy still prevents execution, use the approved signing or policy process.
+
+Then:
+
+1. Select **Set / Replace _configured-variable-name_** and enter the credential.
+2. Create a project or select an existing folder under `~/projects`.
+3. Select a configured agent.
+4. Review **Readiness** and choose **Launch Selected Agent**.
+
+The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a separate Windows PowerShell console.
+
+## Credential behavior
+
+The encrypted blob can only be decrypted through Windows DPAPI in the same account context. The helper decrypts it in memory, sets the configured process-scoped variable, and imports that variable into WSL through `WSLENV`.
+
+The credential is inherited by the WSL Bash login-shell startup process **before nono launches**. Bash startup files loaded in that path—such as system profiles, the account's selected login profile, and scripts those files source—can read the inherited environment. Those startup files are part of the trusted boundary and must be protected from untrusted modification.
+
+The value is not written into the WSL command line, generated Bash command text, startup files, GUI, or readiness output. It is nevertheless present in the environment of Bash, its startup processing, nono, the launched tool, and descendant processes.
+
+For deployment, security must decide whether DPAPI-file storage is acceptable or whether Windows Credential Manager or an enterprise secret broker is required.
+
+To remove the stored credential, close all launchpad and agent windows and delete the DPAPI file. The launchpad intentionally has no reset or delete button.
+
+## Profile validation and runtime compatibility
+
+No launch options are active by default. Depending on the selected profile, nono may prompt for project access or require additional approved options.
+
+A green readiness result confirms only that the distro and configured executables are present. It does not certify the configured profile, permissions, or runtime behavior. Validate each profile strictly, review its effective filesystem and network policy, and perform a real read/write launch test for every configured agent before deployment.
+
+## Safety choices
+
+- Project names are limited to 1–64 characters: letters, numbers, `.`, `_`, and `-`; the first character must be alphanumeric.
+- Projects remain in WSL ext4 under `~/projects`, not `/mnt/c`.
+- No install, update, repair, overwrite-profile, delete-project, or reset-distro operation is included.
+- No credential value is displayed or intentionally logged.
+- The generated launch structure is:
+
+  ```bash
+  nono run --profile PROFILE NONO_ARGUMENTS -- COMMAND AGENT_ARGUMENTS
+  ```

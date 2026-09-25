@@ -1,0 +1,8 @@
+# Local credentials and generated test artifacts
+*.dpapi
+*.zip
+
+# Editor and OS metadata
+.vscode/
+.DS_Store
+Thumbs.db
