@@ -110,8 +110,10 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("function Get-BashCommandArguments", SCRIPT)
         self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
         self.assertIn("$arguments += '-i'", SCRIPT)
-        self.assertGreaterEqual(SCRIPT.count("-UseAgentShell)"), 2)
+        self.assertGreaterEqual(SCRIPT.count("-UseAgentShell)"), 1)
         self.assertIn("-UseAgentShell\n            foreach ($line in $result)", SCRIPT)
+        self.assertIn("if ($Config.UseInteractiveAgentShell) { $bashArguments += '-i' }", SCRIPT)
+        self.assertIn("$bashArguments += $temporaryLinuxPath", SCRIPT)
         self.assertNotIn("-- bash -lc $linux", SCRIPT)
 
     def test_startup_chatter_is_ignored_without_path_diagnostics(self):

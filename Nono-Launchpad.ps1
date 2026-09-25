@@ -245,6 +245,15 @@ function Invoke-WithCredentialEnvironment {
     }
 }
 
+function New-CryptographicLaunchTempPath {
+    $randomBytes = New-Object byte[] 24
+    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $generator.GetBytes($randomBytes) }
+    finally { $generator.Dispose() }
+    $token = -join @($randomBytes | ForEach-Object { $_.ToString('x2') })
+    return "/tmp/nono-launch-$token.sh"
+}
+
 function Invoke-AgentInCurrentConsole {
     param(
         [Parameter(Mandatory)][string]$AgentName,
@@ -270,16 +279,47 @@ function Invoke-AgentInCurrentConsole {
     # Project names/root are constrained above. Ordinary configurable arguments
     # are single-quoted. Exact {ENV:NAME} items become validated, double-quoted
     # runtime expansions. The credential arrives only through the environment.
-    $linux = "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd `"`$HOME/$root/$ProjectName`" || exit 20; exec $quotedLaunch"
-    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
+    # A script file avoids passing the generated command through bash -c after
+    # PowerShell 5.1 and wsl.exe have each performed argument processing.
+    $linuxScript = @(
+        '#!/usr/bin/env bash'
+        'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
+        'export PATH="$HOME/.local/bin:$PATH"'
+        "cd `"`$HOME/$root/$ProjectName`" || exit 20"
+        "exec $quotedLaunch"
+    ) -join "`n"
+    $linuxScript += "`n"
+    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxScript))
+    $temporaryLinuxPath = New-CryptographicLaunchTempPath
+    $createBootstrap = 'umask 077; set -C; printf %s $1 | base64 -d > $2 && chmod 700 $2'
 
-    Invoke-WithCredentialEnvironment {
-        Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
-        Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
-        Write-Host ''
-        & wsl.exe -d $Config.Distro -- bash @bashArguments
-        $exitCode = $LASTEXITCODE
-        if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
+    try {
+        # The bootstrap, base64 text, and path contain no credential. set -C
+        # rejects the already-improbable case where the random path exists.
+        & wsl.exe -d $Config.Distro -- bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath
+        $creationExitCode = $LASTEXITCODE
+        if ($creationExitCode -ne 0) {
+            throw "Could not create the temporary WSL launch script (exit code $creationExitCode)."
+        }
+
+        $bashArguments = @('-l')
+        if ($Config.UseInteractiveAgentShell) { $bashArguments += '-i' }
+        $bashArguments += $temporaryLinuxPath
+
+        Invoke-WithCredentialEnvironment {
+            Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
+            Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
+            Write-Host ''
+            & wsl.exe -d $Config.Distro -- bash @bashArguments
+            $exitCode = $LASTEXITCODE
+            if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
+        }
+    }
+    finally {
+        # Normally the script removes itself before exec. This handles creation,
+        # startup, and self-delete failures without masking the launch result.
+        try { $null = & wsl.exe -d $Config.Distro -- rm -f -- $temporaryLinuxPath 2>$null }
+        catch { }
     }
 }
 

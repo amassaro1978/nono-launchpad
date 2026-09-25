@@ -144,18 +144,27 @@ Explorer view is not.
 
 The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a separate Windows PowerShell console.
 
+For Launch only, the helper transfers the generated non-secret Bash program as
+UTF-8 base64 into a cryptographically named file under WSL `/tmp`, sets mode
+`700`, and starts Bash with only login/interactive flags and that file path.
+The file removes itself before `exec nono`; the Windows helper also attempts
+cleanup in a `finally` block. Creation must succeed before the agent starts.
+Project listing/creation and **Open Shell** continue to use their existing
+command transport and are not affected by this Launch-only path.
+
 ## Static checks
 
 From the repository root, run:
 
 ```text
-python3 -m unittest -v tests/test_static.py
+python3 -m unittest -v tests/test_static.py tests/test_launch_transport.py
 ```
 
 These checks parse the embedded XAML and guard the responsive layout, named
 launch-status controls, direct agent/profile readiness checks, folder
-targeting, and security-sensitive defaults. They do not replace a Windows
-PowerShell 5.1/WPF/WSL runtime test.
+targeting, Launch-only script transport, unchanged project/Open Shell regions,
+and security-sensitive defaults. They do not replace a Windows PowerShell
+5.1/WPF/WSL runtime test.
 
 ## Credential behavior
 
@@ -169,8 +178,8 @@ inherited environment. Those startup files are part of the trusted boundary
 and must be protected from untrusted modification.
 
 The value remains process-environment-only: it is not written into the WSL
-command line, generated Bash command text, startup files, GUI, readiness
-output, or shell-mode configuration. It is nevertheless present in the
+command line, temporary Bash script, startup files, GUI, readiness output, or
+shell-mode configuration. It is nevertheless present in the
 environment of Bash, its startup processing, nono, the launched tool, and
 descendant processes.
 
