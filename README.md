@@ -49,11 +49,11 @@ non-secret `PATH` customizations for readiness and launch. Set it to `$false`
 only when the managed environment intentionally requires a minimal,
 noninteractive login shell.
 
-Interactive startup files may print banners or job-control warnings when a GUI
-readiness check has no terminal. Readiness parses only private status markers
-and ignores all unrelated startup output. A failed agent-environment check
-reports only its exit code, not raw startup output. The launchpad does not
-display or log `PATH` values or resolved executable locations.
+The GUI readiness panel checks only prerequisites it can verify reliably:
+distro registration and credential configuration. Executable and profile
+validation happens in the real interactive Launch terminal, which remains open
+on failure. The launchpad does not display or log `PATH` values or resolved
+executable locations.
 
 ### Configurable agent defaults
 
@@ -202,12 +202,9 @@ test for every configured agent before deployment.
 
 Readiness checks each configured profile directly with `nono profile show`.
 
-Executable and profile probes are advisory rather than hard launch gates.
-Shell startup behavior can make command discovery report a false negative even
-when a tool is available in the real launch environment. The Launch button is
-enabled when the credential, distro, selected project, and configured agent
-selection are valid. The launched terminal is the authoritative runtime test
-and reports any genuine command or profile error.
+The Launch button is enabled when the credential, distro, selected project,
+and configured agent selection are valid. The launched terminal is the
+authoritative runtime test and reports any genuine executable or profile error.
 
 If a launch fails, its terminal remains open and displays the generated command
 structure plus the WSL/nono error before waiting for Enter. The command

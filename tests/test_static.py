@@ -85,43 +85,41 @@ class LaunchpadStaticTests(unittest.TestCase):
         ):
             self.assertIn(reason, SCRIPT)
 
-    def test_agent_and_profile_readiness_remain_direct(self):
+    def test_agent_and_profile_validation_is_deferred_to_real_launch(self):
         self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
-        self.assertIn("command -v $commandLiteral", SCRIPT)
-        self.assertIn("nono profile show $profileLiteral --json", SCRIPT)
+        self.assertNotIn("command -v $commandLiteral", SCRIPT)
+        self.assertNotIn("nono profile show $profileLiteral --json", SCRIPT)
+        self.assertIn("Agent executable and profile: validated by Launch", SCRIPT)
+        self.assertIn("Launch errors remain visible in the agent terminal", SCRIPT)
         self.assertIn("$LaunchButton.IsEnabled = $blockers.Count -eq 0", SCRIPT)
 
-    def test_command_and_profile_probes_are_advisory_not_hard_gates(self):
+    def test_false_command_and_profile_probe_warnings_are_removed(self):
         self.assertIn("$blockers = New-Object System.Collections.Generic.List[string]", SCRIPT)
-        self.assertIn("$warnings = New-Object System.Collections.Generic.List[string]", SCRIPT)
-        self.assertIn("nono executable was not verified", SCRIPT)
-        self.assertIn("agent executable", SCRIPT)
-        self.assertIn("profile '", SCRIPT)
+        self.assertNotIn("$warnings = New-Object System.Collections.Generic.List[string]", SCRIPT)
+        self.assertNotIn("nono executable was not verified", SCRIPT)
+        self.assertNotIn("was not verified", SCRIPT)
         blocker_adds = "\n".join(
             line for line in SCRIPT.splitlines() if "$blockers.Add(" in line
         )
         self.assertNotIn("nono executable", blocker_adds)
         self.assertNotIn("agent executable", blocker_adds)
         self.assertNotIn("profile '", blocker_adds)
-        self.assertIn("Executable and profile probes are advisory", README)
+        self.assertIn("authoritative runtime test", README)
 
-    def test_readiness_launch_and_open_shell_share_interactive_login_mode(self):
+    def test_launch_and_open_shell_share_interactive_login_mode(self):
         self.assertIn("UseInteractiveAgentShell = $true", SCRIPT)
         self.assertIn("function Get-BashCommandArguments", SCRIPT)
         self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
         self.assertIn("$arguments += '-i'", SCRIPT)
-        self.assertGreaterEqual(SCRIPT.count("-UseAgentShell)"), 1)
-        self.assertIn("-UseAgentShell\n            foreach ($line in $result)", SCRIPT)
         self.assertIn("if ($Config.UseInteractiveAgentShell) { $bashArguments += '-i' }", SCRIPT)
         self.assertIn("$bashArguments += $temporaryLinuxPath", SCRIPT)
+        self.assertIn("Get-BashCommandArguments -LinuxScript $linux -UseAgentShell", SCRIPT)
         self.assertNotIn("-- bash -lc $linux", SCRIPT)
 
-    def test_startup_chatter_is_ignored_without_path_diagnostics(self):
-        marker = "__NONO_LAUNCHPAD_READINESS__"
-        self.assertGreaterEqual(SCRIPT.count(marker), 6)
-        self.assertIn("Only exact private markers are parsed", SCRIPT)
+    def test_readiness_avoids_shell_probe_and_path_diagnostics(self):
+        self.assertNotIn("__NONO_LAUNCHPAD_READINESS__", SCRIPT)
+        self.assertNotIn("Only exact private markers are parsed", SCRIPT)
         self.assertNotIn("$lines.Add($line)", SCRIPT)
-        self.assertIn('throw "WSL agent-environment check failed with exit code $LASTEXITCODE."', SCRIPT)
         combined = SCRIPT + "\n" + README
         for forbidden in ("type -a ", "command -V ", "which nono", 'Text = "PATH',
                           '$lines.Add("PATH', "Write-Host $env:PATH"):

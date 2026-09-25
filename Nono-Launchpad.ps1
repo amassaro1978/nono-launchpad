@@ -636,11 +636,9 @@ $window.Width = [Math]::Min(880.0, $workArea.Width)
 $names = @('CredentialHeading','CredentialStatus','SetKeyButton','RefreshButton','ProjectCombo','CreateButton','NewProjectText','AgentCombo','OpenFolderButton','OpenShellButton','CheckButton','StatusText','LaunchStatusArea','LaunchStatusBanner','LaunchStatusText','LaunchButton','MainScrollViewer')
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
-$script:Readiness = @{ Distro = $false; Nono = $false; Agents = @{}; Profiles = @{} }
+$script:Readiness = @{ Distro = $false }
 foreach ($agentName in $Config.Agents.Keys) {
     [void]$AgentCombo.Items.Add([string]$agentName)
-    $script:Readiness.Agents[[string]$agentName] = $false
-    $script:Readiness.Profiles[[string]$agentName] = $null
 }
 if ($AgentCombo.Items.Count -gt 0) { $AgentCombo.SelectedIndex = 0 }
 $CredentialHeading.Text = "Credential: $($Config.CredentialVariable)"
@@ -662,46 +660,26 @@ function Update-ControlState {
     $keyOk = Test-CredentialConfigured
     $agentName = Get-SelectedAgent
     $agentConfigured = Test-AgentConfigured $agentName
-    $agentOk = $agentConfigured -and ($script:Readiness.Agents.ContainsKey($agentName)) -and $script:Readiness.Agents[$agentName]
-    $profileOk = $true
-    if ($agentConfigured -and $script:Readiness.Profiles.ContainsKey($agentName) -and $null -ne $script:Readiness.Profiles[$agentName]) {
-        $profileOk = [bool]$script:Readiness.Profiles[$agentName]
-    }
 
-    # Only prerequisites that make a launch structurally impossible are hard
-    # blockers. Executable/profile probes are advisory because shell startup
-    # behavior can make command discovery return false negatives. The launch
-    # terminal is the authoritative runtime test and will show a real error.
+    # Gate only on prerequisites the GUI can verify reliably. Executable and
+    # profile validation happens in the launch terminal, which stays open on
+    # failure and is authoritative for the real interactive shell environment.
     $blockers = New-Object System.Collections.Generic.List[string]
-    $warnings = New-Object System.Collections.Generic.List[string]
     if (-not $keyOk) { $blockers.Add("save $($Config.CredentialVariable)") }
     if (-not $script:Readiness.Distro) { $blockers.Add("WSL distro '$($Config.Distro)' is unavailable") }
     if (-not $agentConfigured) { $blockers.Add('select a configured agent') }
     if (-not $projectOk) { $blockers.Add('select a project') }
-    if ($script:Readiness.Distro -and -not $script:Readiness.Nono) { $warnings.Add('nono executable was not verified') }
-    if ($agentConfigured -and -not $agentOk) { $warnings.Add("agent executable '$([string]$Config.Agents[$agentName].Command)' was not verified") }
-    if (-not $profileOk) { $warnings.Add("profile '$([string]$Config.Agents[$agentName].Profile)' was not verified") }
 
     $LaunchButton.IsEnabled = $blockers.Count -eq 0
     $OpenFolderButton.IsEnabled = $projectOk -and $script:Readiness.Distro
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
     $CredentialStatus.Foreground = if ($keyOk) { '#1E8449' } else { '#B03A2E' }
     if ($LaunchButton.IsEnabled) {
-        $warningText = @($warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
-        if ([string]::IsNullOrWhiteSpace($warningText)) {
-            $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
-            $LaunchStatusBanner.Background = '#EAF7EF'
-            $LaunchStatusBanner.BorderBrush = '#9AC9AA'
-            $LaunchStatusText.Foreground = '#176B3A'
-            $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
-        }
-        else {
-            $LaunchStatusText.Text = "Ready to attempt launch. Advisory: $warningText."
-            $LaunchStatusBanner.Background = '#FFF4E5'
-            $LaunchStatusBanner.BorderBrush = '#E5C07B'
-            $LaunchStatusText.Foreground = '#7A4B00'
-            $LaunchButton.ToolTip = 'Readiness probes are advisory; the launch terminal will show the authoritative result.'
-        }
+        $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
+        $LaunchStatusBanner.Background = '#EAF7EF'
+        $LaunchStatusBanner.BorderBrush = '#9AC9AA'
+        $LaunchStatusText.Foreground = '#176B3A'
+        $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
     }
     else {
         $reasonText = @($blockers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
@@ -732,62 +710,13 @@ function Refresh-Projects {
 }
 
 function Refresh-Readiness {
-    $agentReadiness = @{}
-    $profileReadiness = @{}
-    foreach ($agentName in $Config.Agents.Keys) {
-        $agentReadiness[[string]$agentName] = $false
-        $profileReadiness[[string]$agentName] = $null
-    }
-    $script:Readiness = @{ Distro = (Test-DistroRegistered); Nono = $false; Agents = $agentReadiness; Profiles = $profileReadiness }
+    $script:Readiness = @{ Distro = (Test-DistroRegistered) }
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("Distro $($Config.Distro): " + $(if ($script:Readiness.Distro) { 'OK' } else { 'MISSING' }))
     $lines.Add("Credential $($Config.CredentialVariable): " + $(if (Test-CredentialConfigured) { 'CONFIGURED' } else { 'NOT CONFIGURED' }))
-
-    if ($script:Readiness.Distro) {
-        try {
-            $agentNames = @($Config.Agents.Keys | ForEach-Object { [string]$_ })
-            $checks = New-Object System.Collections.Generic.List[string]
-            $checks.Add('export PATH="$HOME/.local/bin:$PATH"')
-            $checks.Add("if command -v 'nono' >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:nono=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:nono=MISSING:END\n'; fi")
-            for ($i = 0; $i -lt $agentNames.Count; $i++) {
-                $commandLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Command)
-                $checks.Add("if command -v $commandLiteral >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:agent$i=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:agent$i=MISSING:END\n'; fi")
-                $profileLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Profile)
-                $checks.Add("if command -v 'nono' >/dev/null 2>&1; then if nono profile show $profileLiteral --json >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:profile$i=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:profile$i=MISSING:END\n'; fi; fi")
-            }
-
-            # Interactive startup files may print banners or job-control warnings.
-            # Only exact private markers are parsed; unrelated output is ignored.
-            $result = Invoke-WslText -LinuxScript ($checks -join '; ') -UseAgentShell
-            foreach ($line in $result) {
-                if ($line -match '__NONO_LAUNCHPAD_READINESS__:nono=(OK|MISSING):END') {
-                    $script:Readiness.Nono = $Matches[1] -eq 'OK'
-                    $lines.Add("nono: $($Matches[1])")
-                }
-                elseif ($line -match '__NONO_LAUNCHPAD_READINESS__:agent([0-9]+)=(OK|MISSING):END') {
-                    $index = [int]$Matches[1]
-                    if ($index -lt $agentNames.Count) {
-                        $agentName = $agentNames[$index]
-                        $script:Readiness.Agents[$agentName] = $Matches[2] -eq 'OK'
-                        $command = [string]$Config.Agents[$agentName].Command
-                        $lines.Add("$agentName command ($command): $($Matches[2])")
-                    }
-                }
-                elseif ($line -match '__NONO_LAUNCHPAD_READINESS__:profile([0-9]+)=(OK|MISSING):END') {
-                    $index = [int]$Matches[1]
-                    if ($index -lt $agentNames.Count) {
-                        $agentName = $agentNames[$index]
-                        $script:Readiness.Profiles[$agentName] = $Matches[2] -eq 'OK'
-                        $profile = [string]$Config.Agents[$agentName].Profile
-                        $lines.Add("$agentName profile ($profile): $($Matches[2])")
-                    }
-                }
-            }
-
-        }
-        catch { $lines.Add("Readiness check failed: $($_.Exception.Message)") }
-    }
+    $lines.Add('Agent executable and profile: validated by Launch')
+    $lines.Add('Launch errors remain visible in the agent terminal.')
     $StatusText.Text = $lines -join [Environment]::NewLine
     Update-ControlState
 }
