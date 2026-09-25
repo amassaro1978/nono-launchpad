@@ -4,6 +4,7 @@
 
 - stores the configured credential as a Windows DPAPI CurrentUser-encrypted blob;
 - injects it only into the launched process tree through a configurable environment-variable name;
+- transports generated non-secret Bash programs through a temporary process environment variable instead of placing complex shell text in `wsl.exe` arguments;
 - creates and lists projects under `~/projects` in the WSL distro's native filesystem;
 - opens a selected project's explicit `\\wsl.localhost\DISTRO\...` path in File Explorer, or opens a Linux shell;
 - dynamically generates its agent list and readiness checks from one configuration mapping;
@@ -48,6 +49,16 @@ works through **Open Shell**. This allows user startup files to supply the same
 non-secret `PATH` customizations for readiness and launch. Set it to `$false`
 only when the managed environment intentionally requires a minimal,
 noninteractive login shell.
+
+Both paths also use the same command transport. Windows PowerShell 5.1 can
+mangle complex native-process arguments containing nested quotes and
+semicolons. The launchpad therefore places each generated, non-secret Bash
+program in the temporary process variable `NONO_LAUNCHPAD_SCRIPT`, adds that
+name to `WSLENV`, and passes Bash only the fixed bootstrap
+`eval "$NONO_LAUNCHPAD_SCRIPT"`. The transported program unsets the variable
+before continuing, and the Windows process value plus the caller's prior
+`WSLENV` are restored in `finally`. No generated launch command is written to
+disk.
 
 Interactive startup files may print banners or job-control warnings when a GUI
 readiness check has no terminal. Readiness parses only private status markers
@@ -97,7 +108,12 @@ The variable name is validated and rendered as one double-quoted Bash expansion:
 
 A plain `$SERVICE_HOST` item remains literal text and does not expand. The named variable must already exist in the WSL launch environment; the placeholder does not store or create its value.
 
-The placeholder name must not equal `CredentialVariable`, case-insensitively. The launchpad rejects that configuration during startup and checks again during argument conversion. This prevents the stored credential from being expanded into command-line arguments where process inspection could expose it.
+The placeholder name must not equal `CredentialVariable` or the reserved
+`NONO_LAUNCHPAD_SCRIPT` transport name, case-insensitively. The launchpad
+rejects either name during startup and checks again during argument conversion.
+This prevents the stored credential from being expanded into command-line
+arguments and prevents configuration from colliding with the internal script
+transport.
 
 ## Start the launchpad
 
@@ -153,7 +169,8 @@ python3 -m unittest -v tests/test_static.py
 ```
 
 These checks parse the embedded XAML and guard the responsive layout, named
-launch-status controls, direct agent/profile readiness checks, folder
+launch-status controls, direct agent/profile readiness checks, shared
+environment-based Bash transport, restoration of process variables, folder
 targeting, and security-sensitive defaults. They do not replace a Windows
 PowerShell 5.1/WPF/WSL runtime test.
 
@@ -173,6 +190,11 @@ command line, generated Bash command text, startup files, GUI, readiness
 output, or shell-mode configuration. It is nevertheless present in the
 environment of Bash, its startup processing, nono, the launched tool, and
 descendant processes.
+
+The separate `NONO_LAUNCHPAD_SCRIPT` transport variable contains only the
+generated non-secret Bash program. It never contains the decrypted credential.
+The credential and script transport each preserve and restore their own prior
+process value and `WSLENV` state, including when the launch wrappers are nested.
 
 For deployment, security must decide whether DPAPI-file storage is acceptable or whether Windows Credential Manager or an enterprise secret broker is required.
 
