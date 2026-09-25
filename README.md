@@ -5,7 +5,7 @@
 - stores the configured credential as a Windows DPAPI CurrentUser-encrypted blob;
 - injects it only into the launched process tree through a configurable environment-variable name;
 - creates and lists projects under `~/projects` in the WSL distro's native filesystem;
-- opens a selected project in File Explorer or a Linux shell;
+- opens a selected project's explicit `\\wsl.localhost\DISTRO\...` path in File Explorer, or opens a Linux shell;
 - dynamically generates its agent list and readiness checks from one configuration mapping;
 - supports separately quoted custom nono options and agent arguments without enabling any by default.
 
@@ -103,6 +103,17 @@ Then:
 3. Select a configured agent.
 4. Review **Readiness** and choose **Launch Selected Agent**.
 
+When launch is unavailable, the footer states every current reason instead of
+leaving the disabled button unexplained: missing credential, distro, `nono`,
+selected agent executable, project selection, or a profile that was checked
+and could not be resolved. Executable checks and launches prepend
+`~/.local/bin` to the WSL `PATH`, matching common per-user installs.
+
+**Open Folder** is intended to open Windows File Explorer directly at the
+selected Linux-native project. It constructs the selected distro's WSL UNC
+path explicitly; opening Explorer itself is expected, but landing at a generic
+Explorer view is not.
+
 The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a separate Windows PowerShell console.
 
 ## Credential behavior
@@ -121,7 +132,18 @@ To remove the stored credential, close all launchpad and agent windows and delet
 
 No launch options are active by default. Depending on the selected profile, nono may prompt for project access or require additional approved options.
 
-A green readiness result confirms only that the distro and configured executables are present. It does not certify the configured profile, permissions, or runtime behavior. Validate each profile strictly, review its effective filesystem and network policy, and perform a real read/write launch test for every configured agent before deployment.
+A green readiness result confirms only that the distro, configured executable,
+and resolvable profile are present. It does not certify the profile's effective
+permissions or runtime behavior. Validate each profile strictly, review its
+effective filesystem and network policy, and perform a real read/write launch
+test for every configured agent before deployment.
+
+The installed-pack inventory is diagnostic only. The launchpad uses the
+documented `nono list --installed` command, but an unsupported command, changed
+output, damaged lockfile, or other pack-list failure is reported as
+informational and never disables launch. Actual launch readiness is based on
+the selected profile resolving through `nono profile show`, not on parsing the
+pack list.
 
 ## Safety choices
 

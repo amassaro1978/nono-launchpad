@@ -12,7 +12,7 @@ Security model:
 - The configured credential variable is prohibited in {ENV:NAME} arguments so
   its value cannot be intentionally expanded into the spawned command's argv.
 
-This utility is not a credential broker. Review README-LAUNCHPAD.md.
+This utility is not a credential broker. Review the accompanying README.
 #>
 
 [CmdletBinding()]
@@ -516,8 +516,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
 
     <Grid Grid.Row="8">
       <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-      <TextBlock x:Name="FooterText" VerticalAlignment="Center"
-                 Foreground="{StaticResource MutedBrush}" FontSize="12"/>
+      <TextBlock x:Name="FooterText" VerticalAlignment="Center" TextWrapping="Wrap"
+                 Margin="0,0,18,0" Foreground="{StaticResource MutedBrush}" FontSize="12"/>
       <Button x:Name="LaunchButton" Grid.Column="1" Content="Launch Selected Agent"
               Style="{StaticResource PrimaryButtonStyle}"/>
     </Grid>
@@ -530,10 +530,11 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @('CredentialHeading','CredentialStatus','SetKeyButton','RefreshButton','ProjectCombo','CreateButton','NewProjectText','AgentCombo','OpenFolderButton','OpenShellButton','CheckButton','StatusText','FooterText','LaunchButton')
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
 
-$script:Readiness = @{ Distro = $false; Nono = $false; Agents = @{} }
+$script:Readiness = @{ Distro = $false; Nono = $false; Agents = @{}; Profiles = @{} }
 foreach ($agentName in $Config.Agents.Keys) {
     [void]$AgentCombo.Items.Add([string]$agentName)
     $script:Readiness.Agents[[string]$agentName] = $false
+    $script:Readiness.Profiles[[string]$agentName] = $null
 }
 if ($AgentCombo.Items.Count -gt 0) { $AgentCombo.SelectedIndex = 0 }
 $CredentialHeading.Text = "Credential: $($Config.CredentialVariable)"
@@ -554,12 +555,35 @@ function Update-ControlState {
     $projectOk = Test-ProjectName (Get-SelectedProject)
     $keyOk = Test-CredentialConfigured
     $agentName = Get-SelectedAgent
-    $agentOk = (Test-AgentConfigured $agentName) -and ($script:Readiness.Agents.ContainsKey($agentName)) -and $script:Readiness.Agents[$agentName]
-    $LaunchButton.IsEnabled = $projectOk -and $keyOk -and $script:Readiness.Distro -and $script:Readiness.Nono -and $agentOk
+    $agentConfigured = Test-AgentConfigured $agentName
+    $agentOk = $agentConfigured -and ($script:Readiness.Agents.ContainsKey($agentName)) -and $script:Readiness.Agents[$agentName]
+    $profileOk = $true
+    if ($agentConfigured -and $script:Readiness.Profiles.ContainsKey($agentName) -and $null -ne $script:Readiness.Profiles[$agentName]) {
+        $profileOk = [bool]$script:Readiness.Profiles[$agentName]
+    }
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    if (-not $keyOk) { $reasons.Add("save $($Config.CredentialVariable)") }
+    if (-not $script:Readiness.Distro) { $reasons.Add("WSL distro '$($Config.Distro)' is unavailable") }
+    if (-not $script:Readiness.Nono) { $reasons.Add('nono executable is unavailable') }
+    if (-not $agentConfigured) { $reasons.Add('select a configured agent') }
+    elseif (-not $agentOk) { $reasons.Add("agent executable '$([string]$Config.Agents[$agentName].Command)' is unavailable") }
+    if (-not $projectOk) { $reasons.Add('select a project') }
+    if (-not $profileOk) { $reasons.Add("profile '$([string]$Config.Agents[$agentName].Profile)' is unavailable") }
+
+    $LaunchButton.IsEnabled = $reasons.Count -eq 0
     $OpenFolderButton.IsEnabled = $projectOk -and $script:Readiness.Distro
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
     $CredentialStatus.Foreground = if ($keyOk) { '#1E8449' } else { '#B03A2E' }
-    $FooterText.Text = "WSL distro: $($Config.Distro)   |   Project root: ~/$($Config.ProjectRoot)"
+    if ($LaunchButton.IsEnabled) {
+        $FooterText.Text = "Ready to launch.   WSL: $($Config.Distro)   |   Projects: ~/$($Config.ProjectRoot)"
+        $LaunchButton.ToolTip = $null
+    }
+    else {
+        $reasonText = $reasons -join '; '
+        $FooterText.Text = "Launch unavailable: $reasonText"
+        $LaunchButton.ToolTip = $reasonText
+    }
 }
 
 function Refresh-Projects {
@@ -581,8 +605,12 @@ function Refresh-Projects {
 
 function Refresh-Readiness {
     $agentReadiness = @{}
-    foreach ($agentName in $Config.Agents.Keys) { $agentReadiness[[string]$agentName] = $false }
-    $script:Readiness = @{ Distro = (Test-DistroRegistered); Nono = $false; Agents = $agentReadiness }
+    $profileReadiness = @{}
+    foreach ($agentName in $Config.Agents.Keys) {
+        $agentReadiness[[string]$agentName] = $false
+        $profileReadiness[[string]$agentName] = $null
+    }
+    $script:Readiness = @{ Distro = (Test-DistroRegistered); Nono = $false; Agents = $agentReadiness; Profiles = $profileReadiness }
 
     $lines = New-Object System.Collections.Generic.List[string]
     $lines.Add("Distro $($Config.Distro): " + $(if ($script:Readiness.Distro) { 'OK' } else { 'MISSING' }))
@@ -597,6 +625,8 @@ function Refresh-Readiness {
             for ($i = 0; $i -lt $agentNames.Count; $i++) {
                 $commandLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Command)
                 $checks.Add("if command -v $commandLiteral >/dev/null 2>&1; then printf 'agent$i=OK\n'; else printf 'agent$i=MISSING\n'; fi")
+                $profileLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Profile)
+                $checks.Add("if command -v 'nono' >/dev/null 2>&1; then if nono profile show $profileLiteral --json >/dev/null 2>&1; then printf 'profile$i=OK\n'; else printf 'profile$i=MISSING\n'; fi; fi")
             }
 
             $result = Invoke-WslText -LinuxScript ($checks -join '; ')
@@ -614,15 +644,38 @@ function Refresh-Readiness {
                         $lines.Add("$agentName command ($command): $($Matches[2])")
                     }
                 }
+                elseif ($line -match '^profile([0-9]+)=(OK|MISSING)$') {
+                    $index = [int]$Matches[1]
+                    if ($index -lt $agentNames.Count) {
+                        $agentName = $agentNames[$index]
+                        $script:Readiness.Profiles[$agentName] = $Matches[2] -eq 'OK'
+                        $profile = [string]$Config.Agents[$agentName].Profile
+                        $lines.Add("$agentName profile ($profile): $($Matches[2])")
+                    }
+                }
             }
+
+            $lines.Add('')
+            $lines.Add('Installed nono packs (informational only; never blocks launch):')
             try {
-                $installed = Invoke-WslText -LinuxScript 'export PATH="$HOME/.local/bin:$PATH"; nono list --installed 2>/dev/null || true'
-                $lines.Add('')
-                $lines.Add('Installed nono packs (informational):')
-                if ($installed.Count -gt 0) { foreach ($line in $installed) { $lines.Add($line) } }
-                else { $lines.Add('(none reported)') }
+                $packResult = Invoke-WslText -LinuxScript 'export PATH="$HOME/.local/bin:$PATH"; pack_output=$(nono list --installed 2>&1); pack_exit=$?; printf "__NONO_PACK_EXIT__=%s\n" "$pack_exit"; if [ -n "$pack_output" ]; then printf "%s\n" "$pack_output"; fi; exit 0'
+                $packExit = $null
+                $packOutput = New-Object System.Collections.Generic.List[string]
+                foreach ($line in $packResult) {
+                    if ($line -match '^__NONO_PACK_EXIT__=([0-9]+)$') { $packExit = [int]$Matches[1] }
+                    else { $packOutput.Add($line) }
+                }
+                if ($packExit -eq 0) {
+                    if ($packOutput.Count -gt 0) { foreach ($line in $packOutput) { $lines.Add($line) } }
+                    else { $lines.Add('(none reported)') }
+                }
+                else {
+                    $lines.Add("Pack inventory query unavailable (exit $packExit); launch readiness is unaffected.")
+                }
             }
-            catch { $lines.Add('Could not query installed nono packs.') }
+            catch {
+                $lines.Add('Pack inventory query unavailable; launch readiness is unaffected.')
+            }
         }
         catch { $lines.Add("Readiness check failed: $($_.Exception.Message)") }
     }
@@ -721,8 +774,16 @@ $OpenFolderButton.Add_Click({
         $projectName = Get-SelectedProject
         if (-not (Test-ProjectName $projectName)) { throw 'Select a project first.' }
         $root = $Config.ProjectRoot
-        $path = (Invoke-WslText -LinuxScript "wslpath -w `"`$HOME/$root/$projectName`"")[0]
-        Start-Process -FilePath explorer.exe -ArgumentList @($path)
+        $linuxPaths = @(Invoke-WslText -LinuxScript "printf '%s\n' `"`$HOME/$root/$projectName`"")
+        if ($linuxPaths.Count -ne 1) { throw 'WSL did not return one project path.' }
+        $linuxPath = [string]$linuxPaths[0]
+        if (-not $linuxPath.StartsWith('/') -or $linuxPath.IndexOf([char]0) -ge 0 -or $linuxPath.Contains('"')) {
+            throw 'WSL returned an invalid project path.'
+        }
+        # Target the selected distro and Linux-native project explicitly. This
+        # avoids a malformed wslpath argument opening only a generic Explorer window.
+        $uncPath = "\\wsl.localhost\$($Config.Distro)" + $linuxPath.Replace('/', '\')
+        Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $uncPath)
     }
     catch { Show-LaunchpadError $_.Exception.Message }
 })
