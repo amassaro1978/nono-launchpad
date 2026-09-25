@@ -90,13 +90,16 @@ class LaunchTransportTests(unittest.TestCase):
         self.assertIn("[Text.Encoding]::UTF8.GetBytes($linuxScript)", self.launch)
         self.assertIn("umask 077; set -C;", self.launch)
         self.assertIn("base64 -d", self.launch)
-        self.assertIn("chmod 700 $2", self.launch)
-        bootstrap = re.search(r"\$createBootstrap = '([^']+)'", self.launch).group(1)
+        self.assertIn("chmod 700 $temporaryLinuxPath", self.launch)
+        bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.launch).group(1)
         self.assertNotIn('"', bootstrap)
         self.assertIn(
-            "bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath",
+            "bash -c $createBootstrap",
             self.launch,
         )
+        self.assertNotIn("bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath", self.launch)
+        self.assertNotIn("printf %s $1", self.launch)
+        self.assertNotIn("chmod 700 $2", self.launch)
 
     def test_creation_exit_is_checked_before_credentialed_launch(self):
         capture = self.launch.index("$creationExitCode = $LASTEXITCODE")

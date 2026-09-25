@@ -291,12 +291,15 @@ function Invoke-AgentInCurrentConsole {
     $linuxScript += "`n"
     $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxScript))
     $temporaryLinuxPath = New-CryptographicLaunchTempPath
-    $createBootstrap = 'umask 077; set -C; printf %s $1 | base64 -d > $2 && chmod 700 $2'
+    # WinPS 5.1 -> wsl.exe does not reliably preserve bash -c positional
+    # arguments. Base64 and the generated path are restricted to shell-safe
+    # characters, so insert them directly without nested quoting.
+    $createBootstrap = "umask 077; set -C; printf %s $encodedScript | base64 -d > $temporaryLinuxPath && chmod 700 $temporaryLinuxPath"
 
     try {
         # The bootstrap, base64 text, and path contain no credential. set -C
         # rejects the already-improbable case where the random path exists.
-        & wsl.exe -d $Config.Distro -- bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath
+        & wsl.exe -d $Config.Distro -- bash -c $createBootstrap
         $creationExitCode = $LASTEXITCODE
         if ($creationExitCode -ne 0) {
             throw "Could not create the temporary WSL launch script (exit code $creationExitCode)."

@@ -147,6 +147,9 @@ The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a 
 For Launch only, the helper transfers the generated non-secret Bash program as
 UTF-8 base64 into a cryptographically named file under WSL `/tmp`, sets mode
 `700`, and starts Bash with only login/interactive flags and that file path.
+The shell-safe base64 payload and random path are placed directly in the fixed
+creation bootstrap because `wsl.exe` does not reliably preserve extra
+positional arguments supplied after `bash -c` by Windows PowerShell 5.1.
 The file removes itself before `exec nono`; the Windows helper also attempts
 cleanup in a `finally` block. Creation must succeed before the agent starts.
 Project listing/creation and **Open Shell** continue to use their existing
