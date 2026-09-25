@@ -140,12 +140,11 @@ Then:
 4. Review **Readiness** and choose **Launch Selected Agent**.
 
 The launch area remains docked at the bottom of the window. Its named status
-banner states every hard blocker when launch is unavailable: missing
-credential, unavailable distro, missing project selection, or missing
-configured-agent selection. Executable and profile probe failures remain
-visible as advisory warnings but do not disable Launch. Hard blockers also
-appear on the disabled button's tooltip. Agent or project selection changes
-refresh the banner immediately.
+banner states every current reason when launch is unavailable: missing
+credential, distro, `nono`, selected agent executable, project selection, or a
+profile that was checked and could not be resolved. The same reason is on the
+disabled button's tooltip. Agent or project selection changes refresh the
+banner immediately.
 
 The main content scrolls independently above the launch area. The initial,
 minimum, and maximum window dimensions are bounded by the current Windows work
