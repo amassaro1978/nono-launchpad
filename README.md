@@ -35,6 +35,26 @@ The encrypted value is stored at:
 %LOCALAPPDATA%\NonoLaunchpad\credential.dpapi
 ```
 
+### Agent shell initialization
+
+Readiness and actual agent launch use the same Bash initialization mode:
+
+```powershell
+UseInteractiveAgentShell = $true
+```
+
+The default starts an interactive login shell, matching the environment that
+works through **Open Shell**. This allows user startup files to supply the same
+non-secret `PATH` customizations for readiness and launch. Set it to `$false`
+only when the managed environment intentionally requires a minimal,
+noninteractive login shell.
+
+Interactive startup files may print banners or job-control warnings when a GUI
+readiness check has no terminal. Readiness parses only private status markers
+and ignores all unrelated startup output. A failed agent-environment check
+reports only its exit code, not raw startup output. The launchpad does not
+display or log `PATH` values or resolved executable locations.
+
 ### Configurable agent defaults
 
 The included mappings are configurable defaults for common signed registry profiles. Validate every profile name or path in the target environment before use.
@@ -141,9 +161,18 @@ PowerShell 5.1/WPF/WSL runtime test.
 
 The encrypted blob can only be decrypted through Windows DPAPI in the same account context. The helper decrypts it in memory, sets the configured process-scoped variable, and imports that variable into WSL through `WSLENV`.
 
-The credential is inherited by the WSL Bash login-shell startup process **before nono launches**. Bash startup files loaded in that path—such as system profiles, the account's selected login profile, and scripts those files source—can read the inherited environment. Those startup files are part of the trusted boundary and must be protected from untrusted modification.
+The credential is inherited by the WSL Bash interactive login-shell startup
+process **before nono launches**. Bash startup files loaded in that path—such
+as system profiles, the account's selected login profile, interactive startup
+files sourced by that profile, and scripts those files source—can read the
+inherited environment. Those startup files are part of the trusted boundary
+and must be protected from untrusted modification.
 
-The value is not written into the WSL command line, generated Bash command text, startup files, GUI, or readiness output. It is nevertheless present in the environment of Bash, its startup processing, nono, the launched tool, and descendant processes.
+The value remains process-environment-only: it is not written into the WSL
+command line, generated Bash command text, startup files, GUI, readiness
+output, or shell-mode configuration. It is nevertheless present in the
+environment of Bash, its startup processing, nono, the launched tool, and
+descendant processes.
 
 For deployment, security must decide whether DPAPI-file storage is acceptable or whether Windows Credential Manager or an enterprise secret broker is required.
 

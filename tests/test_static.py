@@ -94,10 +94,33 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("nono profile show $profileLiteral --json", SCRIPT)
         self.assertIn("$LaunchButton.IsEnabled = $reasons.Count -eq 0", SCRIPT)
 
+    def test_readiness_launch_and_open_shell_share_interactive_login_mode(self):
+        self.assertIn("UseInteractiveAgentShell = $true", SCRIPT)
+        self.assertIn("function Get-BashCommandArguments", SCRIPT)
+        self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
+        self.assertIn("$arguments += '-i'", SCRIPT)
+        self.assertGreaterEqual(SCRIPT.count("-UseAgentShell)"), 2)
+        self.assertIn("-UseAgentShell\n            foreach ($line in $result)", SCRIPT)
+        self.assertNotIn("-- bash -lc $linux", SCRIPT)
+
+    def test_startup_chatter_is_ignored_without_path_diagnostics(self):
+        marker = "__NONO_LAUNCHPAD_READINESS__"
+        self.assertGreaterEqual(SCRIPT.count(marker), 6)
+        self.assertIn("Only exact private markers are parsed", SCRIPT)
+        self.assertNotIn("$lines.Add($line)", SCRIPT)
+        self.assertIn('throw "WSL agent-environment check failed with exit code $LASTEXITCODE."', SCRIPT)
+        combined = SCRIPT + "\n" + README
+        for forbidden in ("type -a ", "command -V ", "which ", 'Text = "PATH',
+                          '$lines.Add("PATH', "Write-Host $env:PATH"):
+            self.assertNotIn(forbidden, combined)
+        self.assertRegex(README, r"does not\s+display or log `PATH`")
+
     def test_security_and_folder_invariants_remain(self):
         self.assertGreaterEqual(SCRIPT.count("NonoArguments = @()"), 3)
         self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
         self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
+        self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
+        self.assertIn("$parts += \"$variableName/u\"", SCRIPT)
         self.assertIn('$linuxPaths = @(Invoke-WslText', SCRIPT)
         self.assertIn('"\\\\wsl.localhost\\$($Config.Distro)"', SCRIPT)
 

@@ -7,8 +7,9 @@ Security model:
 - The plaintext value is never written to disk, placed in a command line, or logged.
 - Launch mode decrypts it only long enough to place it in the launcher's process
   environment. WSL imports it through WSLENV for the lifetime of that process tree.
-- The WSL Bash login-shell process and every startup file it loads inherit the
-  credential before nono starts. Those startup files are part of the trusted boundary.
+- The WSL Bash interactive login-shell process and every startup file it loads
+  inherit the credential before nono starts. Those startup files are part of
+  the trusted boundary.
 - The configured credential variable is prohibited in {ENV:NAME} arguments so
   its value cannot be intentionally expanded into the spawned command's argv.
 
@@ -49,6 +50,9 @@ $ErrorActionPreference = 'Stop'
 $Config = @{
     Distro            = 'Ubuntu-24.04'
     ProjectRoot       = 'projects' # relative to the WSL user's $HOME
+    # Match Open Shell by loading the interactive login environment for both
+    # readiness and agent launch. Set false only for a deliberately minimal shell.
+    UseInteractiveAgentShell = $true
     CredentialVariable = 'PROXY_API_KEY'
     CredentialFile    = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\credential.dpapi'
     # Configurable defaults for common signed registry profiles.
@@ -85,6 +89,7 @@ $Config = @{
 function Assert-Configuration {
     if ($Config.Distro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'Unsafe Distro setting.' }
     if ($Config.ProjectRoot -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Unsafe ProjectRoot setting.' }
+    if ($Config.UseInteractiveAgentShell -isnot [bool]) { throw 'UseInteractiveAgentShell must be true or false.' }
     if ($Config.CredentialVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'CredentialVariable must be a valid environment-variable name.' }
     if ($Config.Agents.Count -lt 1) { throw 'Configure at least one agent.' }
 
@@ -146,10 +151,28 @@ function Test-ProjectName {
         ($Name -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 }
 
+function Get-BashCommandArguments {
+    param(
+        [Parameter(Mandatory)][string]$LinuxScript,
+        [switch]$UseAgentShell
+    )
+    $arguments = @('-l')
+    if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $arguments += '-i' }
+    $arguments += @('-c', $LinuxScript)
+    return $arguments
+}
+
 function Invoke-WslText {
-    param([Parameter(Mandatory)][string]$LinuxScript)
-    $output = & wsl.exe -d $Config.Distro -- bash -lc $LinuxScript 2>&1
+    param(
+        [Parameter(Mandatory)][string]$LinuxScript,
+        [switch]$UseAgentShell
+    )
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $LinuxScript -UseAgentShell:$UseAgentShell)
+    $output = & wsl.exe -d $Config.Distro -- bash @bashArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
+        if ($UseAgentShell) {
+            throw "WSL agent-environment check failed with exit code $LASTEXITCODE."
+        }
         throw (($output | Out-String).Trim())
     }
     return @(($output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })
@@ -248,9 +271,10 @@ function Invoke-AgentInCurrentConsole {
     # are single-quoted. Exact {ENV:NAME} items become validated, double-quoted
     # runtime expansions. The credential arrives only through the environment.
     $linux = "export PATH=`"`$HOME/.local/bin:`$PATH`"; cd `"`$HOME/$root/$ProjectName`" || exit 20; exec $quotedLaunch"
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
 
     Invoke-WithCredentialEnvironment {
-        & wsl.exe -d $Config.Distro -- bash -lc $linux
+        & wsl.exe -d $Config.Distro -- bash @bashArguments
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
     }
@@ -267,7 +291,8 @@ function Open-ShellInCurrentConsole {
         if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
         $linux = "cd `"`$HOME/$root/$ProjectName`" || exit 20; exec bash -l"
     }
-    & wsl.exe -d $Config.Distro -- bash -lc $linux
+    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
+    & wsl.exe -d $Config.Distro -- bash @bashArguments
 }
 
 if ($Mode -eq 'Launch') {
@@ -657,21 +682,23 @@ function Refresh-Readiness {
             $agentNames = @($Config.Agents.Keys | ForEach-Object { [string]$_ })
             $checks = New-Object System.Collections.Generic.List[string]
             $checks.Add('export PATH="$HOME/.local/bin:$PATH"')
-            $checks.Add("if command -v 'nono' >/dev/null 2>&1; then printf 'nono=OK\n'; else printf 'nono=MISSING\n'; fi")
+            $checks.Add("if command -v 'nono' >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:nono=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:nono=MISSING:END\n'; fi")
             for ($i = 0; $i -lt $agentNames.Count; $i++) {
                 $commandLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Command)
-                $checks.Add("if command -v $commandLiteral >/dev/null 2>&1; then printf 'agent$i=OK\n'; else printf 'agent$i=MISSING\n'; fi")
+                $checks.Add("if command -v $commandLiteral >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:agent$i=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:agent$i=MISSING:END\n'; fi")
                 $profileLiteral = ConvertTo-BashLiteral ([string]$Config.Agents[$agentNames[$i]].Profile)
-                $checks.Add("if command -v 'nono' >/dev/null 2>&1; then if nono profile show $profileLiteral --json >/dev/null 2>&1; then printf 'profile$i=OK\n'; else printf 'profile$i=MISSING\n'; fi; fi")
+                $checks.Add("if command -v 'nono' >/dev/null 2>&1; then if nono profile show $profileLiteral --json >/dev/null 2>&1; then printf '__NONO_LAUNCHPAD_READINESS__:profile$i=OK:END\n'; else printf '__NONO_LAUNCHPAD_READINESS__:profile$i=MISSING:END\n'; fi; fi")
             }
 
-            $result = Invoke-WslText -LinuxScript ($checks -join '; ')
+            # Interactive startup files may print banners or job-control warnings.
+            # Only exact private markers are parsed; unrelated output is ignored.
+            $result = Invoke-WslText -LinuxScript ($checks -join '; ') -UseAgentShell
             foreach ($line in $result) {
-                if ($line -match '^nono=(OK|MISSING)$') {
+                if ($line -match '__NONO_LAUNCHPAD_READINESS__:nono=(OK|MISSING):END') {
                     $script:Readiness.Nono = $Matches[1] -eq 'OK'
                     $lines.Add("nono: $($Matches[1])")
                 }
-                elseif ($line -match '^agent([0-9]+)=(OK|MISSING)$') {
+                elseif ($line -match '__NONO_LAUNCHPAD_READINESS__:agent([0-9]+)=(OK|MISSING):END') {
                     $index = [int]$Matches[1]
                     if ($index -lt $agentNames.Count) {
                         $agentName = $agentNames[$index]
@@ -680,7 +707,7 @@ function Refresh-Readiness {
                         $lines.Add("$agentName command ($command): $($Matches[2])")
                     }
                 }
-                elseif ($line -match '^profile([0-9]+)=(OK|MISSING)$') {
+                elseif ($line -match '__NONO_LAUNCHPAD_READINESS__:profile([0-9]+)=(OK|MISSING):END') {
                     $index = [int]$Matches[1]
                     if ($index -lt $agentNames.Count) {
                         $agentName = $agentNames[$index]
