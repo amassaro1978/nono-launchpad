@@ -190,6 +190,13 @@ test for every configured agent before deployment.
 
 Readiness checks each configured profile directly with `nono profile show`.
 
+Executable and profile probes are advisory rather than hard launch gates.
+Shell startup behavior can make command discovery report a false negative even
+when a tool is available in the real launch environment. The Launch button is
+enabled when the credential, distro, selected project, and configured agent
+selection are valid. The launched terminal is the authoritative runtime test
+and reports any genuine command or profile error.
+
 ## Safety choices
 
 - Project names are limited to 1–64 characters: letters, numbers, `.`, `_`, and `-`; the first character must be alphanumeric.

@@ -80,11 +80,8 @@ class LaunchpadStaticTests(unittest.TestCase):
         for reason in (
             "save $($Config.CredentialVariable)",
             "WSL distro '$($Config.Distro)' is unavailable",
-            "nono executable is unavailable",
             "select a configured agent",
-            "agent executable",
             "select a project",
-            "profile '",
         ):
             self.assertIn(reason, SCRIPT)
 
@@ -92,7 +89,21 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
         self.assertIn("command -v $commandLiteral", SCRIPT)
         self.assertIn("nono profile show $profileLiteral --json", SCRIPT)
-        self.assertIn("$LaunchButton.IsEnabled = $reasons.Count -eq 0", SCRIPT)
+        self.assertIn("$LaunchButton.IsEnabled = $blockers.Count -eq 0", SCRIPT)
+
+    def test_command_and_profile_probes_are_advisory_not_hard_gates(self):
+        self.assertIn("$blockers = New-Object System.Collections.Generic.List[string]", SCRIPT)
+        self.assertIn("$warnings = New-Object System.Collections.Generic.List[string]", SCRIPT)
+        self.assertIn("nono executable was not verified", SCRIPT)
+        self.assertIn("agent executable", SCRIPT)
+        self.assertIn("profile '", SCRIPT)
+        blocker_adds = "\n".join(
+            line for line in SCRIPT.splitlines() if "$blockers.Add(" in line
+        )
+        self.assertNotIn("nono executable", blocker_adds)
+        self.assertNotIn("agent executable", blocker_adds)
+        self.assertNotIn("profile '", blocker_adds)
+        self.assertIn("Executable and profile probes are advisory", README)
 
     def test_readiness_launch_and_open_shell_share_interactive_login_mode(self):
         self.assertIn("UseInteractiveAgentShell = $true", SCRIPT)

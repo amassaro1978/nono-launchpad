@@ -616,28 +616,43 @@ function Update-ControlState {
         $profileOk = [bool]$script:Readiness.Profiles[$agentName]
     }
 
-    $reasons = New-Object System.Collections.Generic.List[string]
-    if (-not $keyOk) { $reasons.Add("save $($Config.CredentialVariable)") }
-    if (-not $script:Readiness.Distro) { $reasons.Add("WSL distro '$($Config.Distro)' is unavailable") }
-    if (-not $script:Readiness.Nono) { $reasons.Add('nono executable is unavailable') }
-    if (-not $agentConfigured) { $reasons.Add('select a configured agent') }
-    elseif (-not $agentOk) { $reasons.Add("agent executable '$([string]$Config.Agents[$agentName].Command)' is unavailable") }
-    if (-not $projectOk) { $reasons.Add('select a project') }
-    if (-not $profileOk) { $reasons.Add("profile '$([string]$Config.Agents[$agentName].Profile)' is unavailable") }
+    # Only prerequisites that make a launch structurally impossible are hard
+    # blockers. Executable/profile probes are advisory because shell startup
+    # behavior can make command discovery return false negatives. The launch
+    # terminal is the authoritative runtime test and will show a real error.
+    $blockers = New-Object System.Collections.Generic.List[string]
+    $warnings = New-Object System.Collections.Generic.List[string]
+    if (-not $keyOk) { $blockers.Add("save $($Config.CredentialVariable)") }
+    if (-not $script:Readiness.Distro) { $blockers.Add("WSL distro '$($Config.Distro)' is unavailable") }
+    if (-not $agentConfigured) { $blockers.Add('select a configured agent') }
+    if (-not $projectOk) { $blockers.Add('select a project') }
+    if ($script:Readiness.Distro -and -not $script:Readiness.Nono) { $warnings.Add('nono executable was not verified') }
+    if ($agentConfigured -and -not $agentOk) { $warnings.Add("agent executable '$([string]$Config.Agents[$agentName].Command)' was not verified") }
+    if (-not $profileOk) { $warnings.Add("profile '$([string]$Config.Agents[$agentName].Profile)' was not verified") }
 
-    $LaunchButton.IsEnabled = $reasons.Count -eq 0
+    $LaunchButton.IsEnabled = $blockers.Count -eq 0
     $OpenFolderButton.IsEnabled = $projectOk -and $script:Readiness.Distro
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
     $CredentialStatus.Foreground = if ($keyOk) { '#1E8449' } else { '#B03A2E' }
     if ($LaunchButton.IsEnabled) {
-        $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
-        $LaunchStatusBanner.Background = '#EAF7EF'
-        $LaunchStatusBanner.BorderBrush = '#9AC9AA'
-        $LaunchStatusText.Foreground = '#176B3A'
-        $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
+        $warningText = @($warnings | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
+        if ([string]::IsNullOrWhiteSpace($warningText)) {
+            $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
+            $LaunchStatusBanner.Background = '#EAF7EF'
+            $LaunchStatusBanner.BorderBrush = '#9AC9AA'
+            $LaunchStatusText.Foreground = '#176B3A'
+            $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
+        }
+        else {
+            $LaunchStatusText.Text = "Ready to attempt launch. Advisory: $warningText."
+            $LaunchStatusBanner.Background = '#FFF4E5'
+            $LaunchStatusBanner.BorderBrush = '#E5C07B'
+            $LaunchStatusText.Foreground = '#7A4B00'
+            $LaunchButton.ToolTip = 'Readiness probes are advisory; the launch terminal will show the authoritative result.'
+        }
     }
     else {
-        $reasonText = @($reasons | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
+        $reasonText = @($blockers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
         if ([string]::IsNullOrWhiteSpace($reasonText)) { $reasonText = 'readiness checks have not completed' }
         $LaunchStatusText.Text = "Launch unavailable: $reasonText"
         $LaunchStatusBanner.Background = '#FFF4E5'
