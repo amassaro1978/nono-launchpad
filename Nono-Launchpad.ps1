@@ -274,6 +274,9 @@ function Invoke-AgentInCurrentConsole {
     $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
 
     Invoke-WithCredentialEnvironment {
+        Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
+        Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
+        Write-Host ''
         & wsl.exe -d $Config.Distro -- bash @bashArguments
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
@@ -297,7 +300,13 @@ function Open-ShellInCurrentConsole {
 
 if ($Mode -eq 'Launch') {
     try { Invoke-AgentInCurrentConsole -AgentName $Agent -ProjectName $Project; exit 0 }
-    catch { Write-Error $_.Exception.Message; exit 1 }
+    catch {
+        Write-Host ''
+        Write-Host "Launch failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'The credential value was not printed. Review the error above, then press Enter to close this window.' -ForegroundColor Yellow
+        [void](Read-Host)
+        exit 1
+    }
 }
 if ($Mode -eq 'Shell') {
     try { Open-ShellInCurrentConsole -ProjectName $Project; exit 0 }

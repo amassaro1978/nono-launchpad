@@ -197,6 +197,11 @@ enabled when the credential, distro, selected project, and configured agent
 selection are valid. The launched terminal is the authoritative runtime test
 and reports any genuine command or profile error.
 
+If a launch fails, its terminal remains open and displays the generated command
+structure plus the WSL/nono error before waiting for Enter. The command
+structure contains profile, executable, and configured argument syntax but does
+not contain the stored credential value, which remains environment-only.
+
 ## Safety choices
 
 - Project names are limited to 1–64 characters: letters, numbers, `.`, `_`, and `-`; the first character must be alphanumeric.

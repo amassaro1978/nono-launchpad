@@ -121,7 +121,7 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertNotIn("$lines.Add($line)", SCRIPT)
         self.assertIn('throw "WSL agent-environment check failed with exit code $LASTEXITCODE."', SCRIPT)
         combined = SCRIPT + "\n" + README
-        for forbidden in ("type -a ", "command -V ", "which ", 'Text = "PATH',
+        for forbidden in ("type -a ", "command -V ", "which nono", 'Text = "PATH',
                           '$lines.Add("PATH', "Write-Host $env:PATH"):
             self.assertNotIn(forbidden, combined)
         self.assertRegex(README, r"does not\s+display or log `PATH`")
@@ -134,6 +134,14 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("$parts += \"$variableName/u\"", SCRIPT)
         self.assertIn('$linuxPaths = @(Invoke-WslText', SCRIPT)
         self.assertIn('"\\\\wsl.localhost\\$($Config.Distro)"', SCRIPT)
+
+    def test_failed_launch_stays_open_without_printing_credential(self):
+        self.assertIn('Write-Host "Command structure: $quotedLaunch"', SCRIPT)
+        self.assertIn('Write-Host "Launch failed: $($_.Exception.Message)"', SCRIPT)
+        self.assertIn("[void](Read-Host)", SCRIPT)
+        self.assertIn("The credential value was not printed", SCRIPT)
+        self.assertNotIn('Write-Host $plain', SCRIPT)
+        self.assertIn("terminal remains open", README)
 
 
 if __name__ == "__main__":
