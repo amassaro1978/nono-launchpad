@@ -36,7 +36,7 @@ class ProtectedRegionTests(unittest.TestCase):
         "Open-ShellInCurrentConsole": (
             b"function Open-ShellInCurrentConsole {",
             b"if ($Mode -eq 'Launch') {",
-            "5dd344e034175e4f9bc9e640d45647e4c684f4cc21dec0814bca8763b1a1f511",
+            "0ab2bc6d0b57bbd30eed4ce135e3be8501ca5c2f9cff4f19a70213469751e726",
         ),
         "Refresh-Projects": (
             b"function Refresh-Projects {",

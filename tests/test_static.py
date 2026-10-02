@@ -116,6 +116,17 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("Get-BashCommandArguments -LinuxScript $linux -UseAgentShell", SCRIPT)
         self.assertNotIn("-- bash -lc $linux", SCRIPT)
 
+    def test_open_shell_uses_credential_environment_wrapper(self):
+        open_shell = SCRIPT.split("function Open-ShellInCurrentConsole {", 1)[1].split(
+            "if ($Mode -eq 'Launch') {", 1
+        )[0]
+        wrapper = open_shell.index("Invoke-WithCredentialEnvironment {")
+        wsl = open_shell.index("& wsl.exe -d $Config.Distro -- bash @bashArguments")
+        self.assertLess(wrapper, wsl)
+        self.assertNotIn("CredentialVariable", open_shell)
+        self.assertNotIn("Write-Host", open_shell)
+        self.assertIn("same DPAPI decryption and process-scoped `WSLENV` injection wrapper", README)
+
     def test_readiness_avoids_shell_probe_and_path_diagnostics(self):
         self.assertNotIn("__NONO_LAUNCHPAD_READINESS__", SCRIPT)
         self.assertNotIn("Only exact private markers are parsed", SCRIPT)

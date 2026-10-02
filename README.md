@@ -5,7 +5,7 @@
 - stores the configured credential as a Windows DPAPI CurrentUser-encrypted blob;
 - injects it only into the launched process tree through a configurable environment-variable name;
 - creates and lists projects under `~/projects` in the WSL distro's native filesystem;
-- opens a selected project's explicit `\\wsl.localhost\DISTRO\...` path in File Explorer, or opens a Linux shell;
+- opens a selected project's explicit `\\wsl.localhost\DISTRO\...` path in File Explorer, or opens a credentialed Linux shell;
 - dynamically generates its agent list and readiness checks from one configuration mapping;
 - supports separately quoted custom nono options and agent arguments without enabling any by default.
 
@@ -153,7 +153,10 @@ positional arguments supplied after `bash -c` by Windows PowerShell 5.1.
 The file removes itself before `exec nono`; the Windows helper also attempts
 cleanup in a `finally` block. Creation must succeed before the agent starts.
 Project listing/creation and **Open Shell** continue to use their existing
-command transport and are not affected by this Launch-only path.
+command transport and are not affected by this Launch-only path. **Open Shell**
+uses the same DPAPI decryption and process-scoped `WSLENV` injection wrapper as
+agent launch, so the configured credential is available to the shell and its
+descendants without being placed in the command line or written to disk.
 
 ## Static checks
 
@@ -165,16 +168,17 @@ python3 -m unittest -v tests/test_static.py tests/test_launch_transport.py
 
 These checks parse the embedded XAML and guard the responsive layout, named
 launch-status controls, direct agent/profile readiness checks, folder
-targeting, Launch-only script transport, unchanged project/Open Shell regions,
-and security-sensitive defaults. They do not replace a Windows PowerShell
-5.1/WPF/WSL runtime test.
+targeting, Launch-only script transport, Open Shell credential wrapping,
+unchanged project-management regions, and security-sensitive defaults. They do
+not replace a Windows PowerShell 5.1/WPF/WSL runtime test.
 
 ## Credential behavior
 
 The encrypted blob can only be decrypted through Windows DPAPI in the same account context. The helper decrypts it in memory, sets the configured process-scoped variable, and imports that variable into WSL through `WSLENV`.
 
 The credential is inherited by the WSL Bash interactive login-shell startup
-process **before nono launches**. Bash startup files loaded in that path—such
+process **before nono launches or an Open Shell session starts**. Bash startup
+files loaded in that path—such
 as system profiles, the account's selected login profile, interactive startup
 files sourced by that profile, and scripts those files source—can read the
 inherited environment. Those startup files are part of the trusted boundary

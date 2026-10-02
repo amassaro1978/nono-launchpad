@@ -338,7 +338,9 @@ function Open-ShellInCurrentConsole {
         $linux = "cd `"`$HOME/$root/$ProjectName`" || exit 20; exec bash -l"
     }
     $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
-    & wsl.exe -d $Config.Distro -- bash @bashArguments
+    Invoke-WithCredentialEnvironment {
+        & wsl.exe -d $Config.Distro -- bash @bashArguments
+    }
 }
 
 if ($Mode -eq 'Launch') {
