@@ -125,7 +125,22 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertLess(wrapper, wsl)
         self.assertNotIn("CredentialVariable", open_shell)
         self.assertNotIn("Write-Host", open_shell)
-        self.assertIn("same DPAPI decryption and process-scoped `WSLENV` injection wrapper", README)
+        self.assertRegex(
+            README,
+            r"same DPAPI\s+decryption and process-scoped `WSLENV` injection wrapper",
+        )
+
+    def test_open_shell_runs_the_same_refresh_before_shell_handoff(self):
+        open_shell = SCRIPT.split("function Open-ShellInCurrentConsole {", 1)[1].split(
+            "if ($Mode -eq 'Launch') {", 1
+        )[0]
+        self.assertIn("@(Get-RemoteRefreshScriptLines)", open_shell)
+        assembly = open_shell.index("@(Get-RemoteRefreshScriptLines)")
+        handoff = open_shell.index("@('exec bash -l')")
+        wrapper = open_shell.index("Invoke-WithCredentialEnvironment {")
+        execution = open_shell.index("bash @bashArguments")
+        self.assertLess(assembly, handoff)
+        self.assertLess(wrapper, execution)
 
     def test_readiness_avoids_shell_probe_and_path_diagnostics(self):
         self.assertNotIn("__NONO_LAUNCHPAD_READINESS__", SCRIPT)
@@ -138,13 +153,73 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertRegex(README, r"does not\s+display or log `PATH`")
 
     def test_security_and_folder_invariants_remain(self):
-        self.assertGreaterEqual(SCRIPT.count("NonoArguments = @()"), 3)
+        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 3)
         self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
         self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
         self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
         self.assertIn("$parts += \"$variableName/u\"", SCRIPT)
         self.assertIn('$linuxPaths = @(Invoke-WslText', SCRIPT)
         self.assertIn('"\\\\wsl.localhost\\$($Config.Distro)"', SCRIPT)
+
+    def test_exactly_six_remote_files_are_configured_with_safe_disabled_defaults(self):
+        config_block = SCRIPT.split(
+            "# =========================== EDIT SETTINGS HERE", 1
+        )[1].split("# ========================= END EDIT SETTINGS HERE", 1)[0]
+        remote_block = config_block.split("RemoteFiles       = [ordered]@{", 1)[1].split(
+            "    Agents            = [ordered]@{", 1
+        )[0]
+        entries = re.findall(
+            r"^        '([^']+)' = @\{\n"
+            r"            Url = '([^']*)'\n"
+            r"            Destination = '([^']+)'\n"
+            r"        \}$",
+            remote_block,
+            re.M,
+        )
+        self.assertEqual(len(entries), 6)
+        self.assertEqual(sum("nono profile" in name for name, _, _ in entries), 3)
+        self.assertEqual(
+            {name for name, _, _ in entries if name.endswith(" config")},
+            {"Claude config", "Codex config", "OpenCode config"},
+        )
+        self.assertTrue(all(url == "" for _, url, _ in entries))
+        destinations = [destination for _, _, destination in entries]
+        self.assertTrue(all(destination.startswith("~/") for destination in destinations))
+        self.assertEqual(len(set(destinations)), 6)
+        self.assertIn("if ($Config.RemoteFiles.Count -ne 6)", SCRIPT)
+        self.assertIn("must use an HTTPS URL without embedded credentials", SCRIPT)
+        self.assertIn("has a whitespace-only Url", SCRIPT)
+        self.assertIn("CurlConnectTimeoutSeconds = 10", SCRIPT)
+        self.assertIn("CurlMaxTimeSeconds = 60", SCRIPT)
+
+    def test_remote_refresh_preserves_existing_files_on_failure(self):
+        refresh = SCRIPT.split("function Get-RemoteRefreshScriptLines {", 1)[1].split(
+            "function Invoke-AgentInCurrentConsole {", 1
+        )[0]
+        for marker in (
+            "curl --fail --silent --show-error --location --connect-timeout $connectTimeout --max-time $maxTime",
+            "--proto '=https' --proto-redir '=https'",
+            "mktemp --tmpdir=\"$directory\"",
+            "mv -fT -- \"$temporary\" \"$destination\"",
+            "rm -f -- \"$temporary\"",
+            "keeping existing file if present",
+            "$Config.RemoteFiles.GetEnumerator()",
+        ):
+            self.assertIn(marker, refresh)
+        self.assertNotIn("sudo", refresh)
+        self.assertIn("[ -n \"$url\" ] || return 0", refresh)
+        launch = SCRIPT.split("function Invoke-AgentInCurrentConsole {", 1)[1].split(
+            "function Open-ShellInCurrentConsole {", 1
+        )[0]
+        script_builder = launch.split("    $linuxScript = @(", 1)[1].split(
+            "    $encodedScript = ", 1
+        )[0]
+        self.assertLess(script_builder.index("cd `\"`$HOME/$root/$ProjectName`\""),
+                        script_builder.index("$remoteRefreshLines"))
+        self.assertLess(script_builder.index("$remoteRefreshLines"),
+                        script_builder.index('"exec $quotedLaunch"'))
+        self.assertLess(launch.index("Invoke-WithCredentialEnvironment"),
+                        launch.index("bash @bashArguments"))
 
     def test_failed_launch_stays_open_without_printing_credential(self):
         self.assertIn('Write-Host "Command structure: $quotedLaunch"', SCRIPT)

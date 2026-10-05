@@ -25,7 +25,7 @@ def text_region(start: str, end: str) -> str:
 
 
 class ProtectedRegionTests(unittest.TestCase):
-    """Hashes are SHA-256 snapshots from parent commit d318bf8."""
+    """Hashes are snapshots from d318bf8, except intentionally changed regions."""
 
     EXPECTED = {
         "Invoke-WslText": (
@@ -36,7 +36,7 @@ class ProtectedRegionTests(unittest.TestCase):
         "Open-ShellInCurrentConsole": (
             b"function Open-ShellInCurrentConsole {",
             b"if ($Mode -eq 'Launch') {",
-            "0ab2bc6d0b57bbd30eed4ce135e3be8501ca5c2f9cff4f19a70213469751e726",
+            "1a6b27fa5c3fde23288946fd57a3813532c11e6bd125c188383a56e472a14954",
         ),
         "Refresh-Projects": (
             b"function Refresh-Projects {",
@@ -122,6 +122,8 @@ class LaunchTransportTests(unittest.TestCase):
 
     def test_script_self_deletes_before_exec_and_finally_cleans_up(self):
         self.assertLess(self.script_builder.index('rm -f -- \"$0\"'),
+                        self.script_builder.index('"exec $quotedLaunch"'))
+        self.assertLess(self.script_builder.index("$remoteRefreshLines"),
                         self.script_builder.index('"exec $quotedLaunch"'))
         self.assertIn("rm -f -- $temporaryLinuxPath", self.launch)
         self.assertRegex(

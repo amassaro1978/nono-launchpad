@@ -7,7 +7,8 @@
 - creates and lists projects under `~/projects` in the WSL distro's native filesystem;
 - opens a selected project's explicit `\\wsl.localhost\DISTRO\...` path in File Explorer, or opens a credentialed Linux shell;
 - dynamically generates its agent list and readiness checks from one configuration mapping;
-- supports separately quoted custom nono options and agent arguments without enabling any by default.
+- optionally refreshes exactly six files from configured HTTPS raw-file URLs before agent launch or Open Shell;
+- enables `--allow-cwd` for each included nono agent mapping and supports separately quoted custom arguments.
 
 ## Edit settings here
 
@@ -57,20 +58,59 @@ executable locations.
 
 ### Configurable agent defaults
 
-The included mappings are configurable defaults for common signed registry profiles. Validate every profile name or path in the target environment before use.
+The included mappings target the three local profiles refreshed before launch. Their names match the JSON filenames under `~/.config/nono/profiles/` without the `.json` extension.
 
 ```powershell
 'Claude Code' = @{
-    Profile = 'nolabs-ai/claude'
+    Profile = 'claude'
     Command = 'claude'
-    NonoArguments = @()
+    NonoArguments = @('--allow-cwd')
     AgentArguments = @()
 }
 ```
 
-All included agents intentionally begin with empty `NonoArguments` and `AgentArguments`. No project-access, domain, model, or other runtime option is assumed.
+All included agents set `NonoArguments = @('--allow-cwd')` so the selected
+`~/projects/...` working directory is available inside nono. Their
+`AgentArguments` arrays remain empty. No domain, model, or other runtime option
+is assumed.
 
 Add or remove future agents only under `Config.Agents`. The GUI and readiness checks update automatically; no XAML or event-handler changes are required.
+
+### Session-time remote files
+
+`Config.RemoteFiles` contains exactly six entries: one nono profile and one
+agent configuration for each of Claude, Codex, and OpenCode. Every URL and
+destination is configured in the **EDIT SETTINGS HERE** block. URLs are empty
+by default, so all six refreshes are disabled until deployment-specific raw
+internal-Git HTTPS URLs are supplied.
+
+```powershell
+'Claude nono profile' = @{
+    Url = ''
+    Destination = '~/.config/nono/profiles/claude.json'
+}
+```
+
+Keep destinations below `~/`; the launchpad resolves that prefix against the
+default user's WSL home directory. Do not embed usernames, tokens, or other
+credentials in a URL. If the internal Git service requires authentication,
+configure an approved non-interactive `curl` authentication mechanism for the
+Linux user separately. `CurlConnectTimeoutSeconds` and `CurlMaxTimeSeconds` in
+the same settings block bound how long each attempted refresh may delay startup.
+
+Immediately before `nono` starts or **Open Shell** hands control to the user's
+shell, the selected WSL process handles each non-empty URL independently. It
+downloads to a restrictive `mktemp` file in the destination directory and
+moves that file over the configured destination only after a successful HTTPS
+download. A failed download, directory preparation, or move prints a warning,
+removes any temporary file, preserves the existing destination when possible,
+and does not prevent the agent or shell from starting. Empty URLs are skipped
+silently. Whitespace-only URLs are rejected during startup. Redirects are
+restricted to HTTPS, and the exact destination must be a file, not a directory.
+
+The included agent mappings use the matching local profile names. Until URLs
+are configured, Launch uses the profile files installed by the PSADT package.
+When a refresh succeeds, the newly downloaded profile is used for that launch.
 
 ### Optional arguments
 
@@ -152,10 +192,13 @@ creation bootstrap because `wsl.exe` does not reliably preserve extra
 positional arguments supplied after `bash -c` by Windows PowerShell 5.1.
 The file removes itself before `exec nono`; the Windows helper also attempts
 cleanup in a `finally` block. Creation must succeed before the agent starts.
-Project listing/creation and **Open Shell** continue to use their existing
-command transport and are not affected by this Launch-only path. **Open Shell**
-uses the same DPAPI decryption and process-scoped `WSLENV` injection wrapper as
-agent launch, so the configured credential is available to the shell and its
+The six configured refresh operations run from this script as the default WSL
+Linux user after entering the selected project and immediately before `nono`.
+Project listing/creation remains unaffected by this Launch-only transport.
+**Open Shell** runs the same refresh function through its existing command
+transport before handing control to Bash. It continues to use the same DPAPI
+decryption and process-scoped `WSLENV` injection wrapper as agent launch, so the
+configured credential is available to refresh commands, the shell, and its
 descendants without being placed in the command line or written to disk.
 
 ## Static checks
@@ -168,7 +211,8 @@ python3 -m unittest -v tests/test_static.py tests/test_launch_transport.py
 
 These checks parse the embedded XAML and guard the responsive layout, named
 launch-status controls, direct agent/profile readiness checks, folder
-targeting, Launch-only script transport, Open Shell credential wrapping,
+targeting, launch/Open Shell remote-file fallback and atomic replacement
+structure, Launch-only script transport, Open Shell credential wrapping,
 unchanged project-management regions, and security-sensitive defaults. They do
 not replace a Windows PowerShell 5.1/WPF/WSL runtime test.
 
@@ -196,7 +240,9 @@ To remove the stored credential, close all launchpad and agent windows and delet
 
 ## Profile validation and runtime compatibility
 
-No launch options are active by default. Depending on the selected profile, nono may prompt for project access or require additional approved options.
+`--allow-cwd` is active for all three included agents. Depending on the
+selected profile, nono may prompt for project access or require additional
+approved options.
 
 A green readiness result confirms only that the distro, configured executable,
 and resolvable profile are present. It does not certify the profile's effective

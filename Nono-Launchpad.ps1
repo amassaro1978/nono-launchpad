@@ -47,33 +47,67 @@ $ErrorActionPreference = 'Stop'
 # launch environment. Plain '$VARIABLE_NAME' is intentionally passed literally.
 # Arguments are individually shell-quoted; do not combine multiple arguments
 # into one string.
+#
+# RemoteFiles contains exactly the six files refreshed immediately before each
+# agent launch and Open Shell handoff. Leave Url empty to disable that file.
+# Destinations must begin
+# with ~/ and are resolved against the default Linux user's home directory.
+# Do not place credentials in URLs; use the WSL user's approved curl auth.
 $Config = @{
-    Distro            = 'Ubuntu-24.04'
+    Distro            = 'Nono-1-0-0'
     ProjectRoot       = 'projects' # relative to the WSL user's $HOME
     # Match Open Shell by loading the interactive login environment for both
     # readiness and agent launch. Set false only for a deliberately minimal shell.
     UseInteractiveAgentShell = $true
     CredentialVariable = 'PROXY_API_KEY'
     CredentialFile    = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\credential.dpapi'
-    # Configurable defaults for common signed registry profiles.
-    # Validate every profile name or path in the target environment.
+    CurlConnectTimeoutSeconds = 10
+    CurlMaxTimeSeconds = 60
+    RemoteFiles       = [ordered]@{
+        'Claude nono profile' = @{
+            Url = ''
+            Destination = '~/.config/nono/profiles/claude.json'
+        }
+        'Codex nono profile' = @{
+            Url = ''
+            Destination = '~/.config/nono/profiles/codex.json'
+        }
+        'OpenCode nono profile' = @{
+            Url = ''
+            Destination = '~/.config/nono/profiles/opencode.json'
+        }
+        'Claude config' = @{
+            Url = ''
+            Destination = '~/.claude/settings.json'
+        }
+        'Codex config' = @{
+            Url = ''
+            Destination = '~/.codex/config.toml'
+        }
+        'OpenCode config' = @{
+            Url = ''
+            Destination = '~/.config/opencode/opencode.json'
+        }
+    }
+    # Configurable local profiles refreshed above before each launch.
+    # Keep each path aligned with its RemoteFiles destination.
     Agents            = [ordered]@{
         'Claude Code' = @{
-            Profile = 'nolabs-ai/claude'
+            Profile = 'claude'
             Command = 'claude'
-            NonoArguments = @()
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'Codex' = @{
-            Profile = 'nolabs-ai/codex'
+            Profile = 'codex'
             Command = 'codex'
-            NonoArguments = @()
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'OpenCode' = @{
-            Profile = 'nolabs-ai/opencode'
+            Profile = 'opencode'
             Command = 'opencode'
-            NonoArguments = @()
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         # 'Future Agent' = @{
@@ -91,7 +125,37 @@ function Assert-Configuration {
     if ($Config.ProjectRoot -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Unsafe ProjectRoot setting.' }
     if ($Config.UseInteractiveAgentShell -isnot [bool]) { throw 'UseInteractiveAgentShell must be true or false.' }
     if ($Config.CredentialVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'CredentialVariable must be a valid environment-variable name.' }
+    foreach ($timeoutName in @('CurlConnectTimeoutSeconds','CurlMaxTimeSeconds')) {
+        if ($Config[$timeoutName] -isnot [int] -or $Config[$timeoutName] -lt 1) { throw "$timeoutName must be a positive integer." }
+    }
+    if ($Config.CurlMaxTimeSeconds -lt $Config.CurlConnectTimeoutSeconds) { throw 'CurlMaxTimeSeconds cannot be shorter than CurlConnectTimeoutSeconds.' }
+    if ($Config.RemoteFiles.Count -ne 6) { throw 'RemoteFiles must contain exactly six files.' }
     if ($Config.Agents.Count -lt 1) { throw 'Configure at least one agent.' }
+
+    $remoteDestinations = @{}
+    foreach ($entry in $Config.RemoteFiles.GetEnumerator()) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.Key)) { throw 'Remote file names cannot be empty.' }
+        foreach ($required in @('Url','Destination')) {
+            if (-not $entry.Value.ContainsKey($required)) { throw "Remote file '$($entry.Key)' is missing $required." }
+        }
+        $url = [string]$entry.Value.Url
+        if ($url -ne '' -and [string]::IsNullOrWhiteSpace($url)) { throw "Remote file '$($entry.Key)' has a whitespace-only Url." }
+        if ($url -ne '') {
+            $parsedUrl = $null
+            if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsedUrl) -or
+                $parsedUrl.Scheme -ne 'https' -or
+                -not [string]::IsNullOrEmpty($parsedUrl.UserInfo)) {
+                throw "Remote file '$($entry.Key)' must use an HTTPS URL without embedded credentials."
+            }
+        }
+        $destination = [string]$entry.Value.Destination
+        if ($destination -notmatch '^~/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$' -or
+            @($destination.Substring(2) -split '/' | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
+            throw "Remote file '$($entry.Key)' has an unsafe Destination. Use a path below ~/ without dot or dot-dot segments."
+        }
+        if ($remoteDestinations.ContainsKey($destination)) { throw "Remote file destination '$destination' is duplicated." }
+        $remoteDestinations[$destination] = $true
+    }
 
     foreach ($entry in $Config.Agents.GetEnumerator()) {
         if ([string]::IsNullOrWhiteSpace([string]$entry.Key)) { throw 'Agent display names cannot be empty.' }
@@ -254,6 +318,41 @@ function New-CryptographicLaunchTempPath {
     return "/tmp/nono-launch-$token.sh"
 }
 
+function Get-RemoteRefreshScriptLines {
+    $connectTimeout = [string]$Config.CurlConnectTimeoutSeconds
+    $maxTime = [string]$Config.CurlMaxTimeSeconds
+    $lines = @(
+        'refresh_file() {'
+        '  label=$1; url=$2; relative_destination=$3'
+        '  [ -n "$url" ] || return 0'
+        '  destination="$HOME/$relative_destination"'
+        '  directory=${destination%/*}'
+        '  if ! mkdir -p -- "$directory"; then'
+        '    printf ''Warning: could not prepare destination for %s; keeping existing file if present.\n'' "$label" >&2'
+        '    return 0'
+        '  fi'
+        '  temporary=$(mktemp --tmpdir="$directory" ''.nono-launchpad-refresh.XXXXXXXXXX'') || {'
+        '    printf ''Warning: could not create a temporary file for %s; keeping existing file if present.\n'' "$label" >&2'
+        '    return 0'
+        '  }'
+        "  if curl --fail --silent --show-error --location --connect-timeout $connectTimeout --max-time $maxTime --proto '=https' --proto-redir '=https' --output `"`$temporary`" -- `"`$url`" &&"
+        '     mv -fT -- "$temporary" "$destination"; then'
+        '    printf ''Updated %s.\n'' "$label"'
+        '  else'
+        '    rm -f -- "$temporary"'
+        '    printf ''Warning: could not refresh %s; keeping existing file if present.\n'' "$label" >&2'
+        '  fi'
+        '}'
+    )
+    foreach ($entry in $Config.RemoteFiles.GetEnumerator()) {
+        $relativeDestination = ([string]$entry.Value.Destination).Substring(2)
+        $lines += 'refresh_file ' + (ConvertTo-BashLiteral ([string]$entry.Key)) + ' ' +
+            (ConvertTo-BashLiteral ([string]$entry.Value.Url)) + ' ' +
+            (ConvertTo-BashLiteral $relativeDestination)
+    }
+    return $lines
+}
+
 function Invoke-AgentInCurrentConsole {
     param(
         [Parameter(Mandatory)][string]$AgentName,
@@ -281,13 +380,16 @@ function Invoke-AgentInCurrentConsole {
     # runtime expansions. The credential arrives only through the environment.
     # A script file avoids passing the generated command through bash -c after
     # PowerShell 5.1 and wsl.exe have each performed argument processing.
+    $remoteRefreshLines = @(Get-RemoteRefreshScriptLines)
     $linuxScript = @(
         '#!/usr/bin/env bash'
         'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
         'export PATH="$HOME/.local/bin:$PATH"'
         "cd `"`$HOME/$root/$ProjectName`" || exit 20"
+    ) + $remoteRefreshLines + @(
         "exec $quotedLaunch"
-    ) -join "`n"
+    )
+    $linuxScript = $linuxScript -join "`n"
     $linuxScript += "`n"
     $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxScript))
     $temporaryLinuxPath = New-CryptographicLaunchTempPath
@@ -331,12 +433,14 @@ function Open-ShellInCurrentConsole {
     if (-not (Test-DistroRegistered)) { throw "WSL distribution '$($Config.Distro)' is not registered." }
     $root = $Config.ProjectRoot
     if ([string]::IsNullOrWhiteSpace($ProjectName)) {
-        $linux = 'cd "$HOME" || exit 20; exec bash -l'
+        $changeDirectory = 'cd "$HOME" || exit 20'
     }
     else {
         if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
-        $linux = "cd `"`$HOME/$root/$ProjectName`" || exit 20; exec bash -l"
+        $changeDirectory = "cd `"`$HOME/$root/$ProjectName`" || exit 20"
     }
+    $linux = @($changeDirectory) + @(Get-RemoteRefreshScriptLines) + @('exec bash -l')
+    $linux = $linux -join "`n"
     $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
     Invoke-WithCredentialEnvironment {
         & wsl.exe -d $Config.Distro -- bash @bashArguments
