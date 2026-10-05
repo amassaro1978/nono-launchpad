@@ -20,6 +20,14 @@ EDIT SETTINGS HERE
 
 All expected launchpad configuration is in that block.
 
+The initial agent selection is controlled explicitly rather than by mapping order:
+
+```powershell
+DefaultAgent = 'OpenCode'
+```
+
+The value must exactly match one display name under `Config.Agents`.
+
 ### Credential variable
 
 `PROXY_API_KEY` is only a placeholder default. Replace it with the actual environment-variable **name** when confirmed. Never place a credential value in the script.

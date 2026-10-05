@@ -93,6 +93,13 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("Launch errors remain visible in the agent terminal", SCRIPT)
         self.assertIn("$LaunchButton.IsEnabled = $blockers.Count -eq 0", SCRIPT)
 
+    def test_opencode_is_the_explicit_default_agent(self):
+        self.assertIn("DefaultAgent      = 'OpenCode'", SCRIPT)
+        self.assertIn("DefaultAgent must match a configured agent display name", SCRIPT)
+        self.assertIn("$AgentCombo.SelectedItem = [string]$Config.DefaultAgent", SCRIPT)
+        self.assertNotIn("$AgentCombo.SelectedIndex = 0", SCRIPT)
+        self.assertIn("DefaultAgent = 'OpenCode'", README)
+
     def test_false_command_and_profile_probe_warnings_are_removed(self):
         self.assertIn("$blockers = New-Object System.Collections.Generic.List[string]", SCRIPT)
         self.assertNotIn("$warnings = New-Object System.Collections.Generic.List[string]", SCRIPT)

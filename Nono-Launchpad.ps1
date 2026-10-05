@@ -56,6 +56,7 @@ $ErrorActionPreference = 'Stop'
 $Config = @{
     Distro            = 'Nono-1-0-0'
     ProjectRoot       = 'projects' # relative to the WSL user's $HOME
+    DefaultAgent      = 'OpenCode'
     # Match Open Shell by loading the interactive login environment for both
     # readiness and agent launch. Set false only for a deliberately minimal shell.
     UseInteractiveAgentShell = $true
@@ -131,6 +132,7 @@ function Assert-Configuration {
     if ($Config.CurlMaxTimeSeconds -lt $Config.CurlConnectTimeoutSeconds) { throw 'CurlMaxTimeSeconds cannot be shorter than CurlConnectTimeoutSeconds.' }
     if ($Config.RemoteFiles.Count -ne 6) { throw 'RemoteFiles must contain exactly six files.' }
     if ($Config.Agents.Count -lt 1) { throw 'Configure at least one agent.' }
+    if (-not $Config.Agents.Contains([string]$Config.DefaultAgent)) { throw 'DefaultAgent must match a configured agent display name.' }
 
     $remoteDestinations = @{}
     foreach ($entry in $Config.RemoteFiles.GetEnumerator()) {
@@ -746,7 +748,7 @@ $script:Readiness = @{ Distro = $false }
 foreach ($agentName in $Config.Agents.Keys) {
     [void]$AgentCombo.Items.Add([string]$agentName)
 }
-if ($AgentCombo.Items.Count -gt 0) { $AgentCombo.SelectedIndex = 0 }
+$AgentCombo.SelectedItem = [string]$Config.DefaultAgent
 $CredentialHeading.Text = "Credential: $($Config.CredentialVariable)"
 $SetKeyButton.Content = "Set / Replace $($Config.CredentialVariable)"
 
