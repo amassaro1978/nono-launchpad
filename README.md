@@ -117,11 +117,11 @@ and does not prevent the agent or shell from starting. Empty URLs are skipped
 silently. Whitespace-only URLs are rejected during startup. Redirects are
 restricted to HTTPS, and the exact destination must be a file, not a directory.
 
-The included agent mappings use the explicit signed pack profiles
-`nolabs-ai/claude`, `nolabs-ai/codex`, and `nolabs-ai/opencode`, preventing a
-same-named local profile from silently shadowing a pack. To intentionally use a
-refreshed local profile, change that agent's `Profile` mapping to the local
-profile name after validating the downloaded file.
+The included agent mappings intentionally use the local profile names `claude`,
+`codex`, and `opencode`. These deployment profiles may extend the corresponding
+signed `nolabs-ai/*` packs while adding organization-specific policy. The packs
+must therefore be installed for `LinuxUser`, and refreshed local profiles remain
+the profiles selected for launch.
 
 ### Optional arguments
 

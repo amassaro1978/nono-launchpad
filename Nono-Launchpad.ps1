@@ -95,19 +95,19 @@ $Config = @{
     # Keep each path aligned with its RemoteFiles destination.
     Agents            = [ordered]@{
         'Claude Code' = @{
-            Profile = 'nolabs-ai/claude'
+            Profile = 'claude'
             Command = 'claude'
             NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'Codex' = @{
-            Profile = 'nolabs-ai/codex'
+            Profile = 'codex'
             Command = 'codex'
             NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'OpenCode' = @{
-            Profile = 'nolabs-ai/opencode'
+            Profile = 'opencode'
             Command = 'opencode'
             NonoArguments = @('--allow-cwd')
             AgentArguments = @()
