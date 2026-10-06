@@ -86,7 +86,7 @@ class LaunchpadStaticTests(unittest.TestCase):
             self.assertIn(reason, SCRIPT)
 
     def test_agent_and_profile_validation_is_deferred_to_real_launch(self):
-        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
+        self.assertIn('export PATH="/home/nono/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"', SCRIPT)
         self.assertNotIn("command -v $commandLiteral", SCRIPT)
         self.assertNotIn("nono profile show $profileLiteral --json", SCRIPT)
         self.assertIn("Agent executable and profile: validated by Launch", SCRIPT)

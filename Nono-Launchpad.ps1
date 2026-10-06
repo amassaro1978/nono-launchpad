@@ -386,7 +386,7 @@ function Invoke-AgentInCurrentConsole {
     $linuxScript = @(
         '#!/usr/bin/env bash'
         'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
-        'export PATH="$HOME/.local/bin:$PATH"'
+        'export PATH="/home/nono/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
         "cd `"`$HOME/$root/$ProjectName`" || exit 20"
     ) + $remoteRefreshLines + @(
         "exec $quotedLaunch"
