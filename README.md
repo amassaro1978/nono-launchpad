@@ -117,9 +117,11 @@ and does not prevent the agent or shell from starting. Empty URLs are skipped
 silently. Whitespace-only URLs are rejected during startup. Redirects are
 restricted to HTTPS, and the exact destination must be a file, not a directory.
 
-The included agent mappings use the matching local profile names. Until URLs
-are configured, Launch uses the profile files installed by the PSADT package.
-When a refresh succeeds, the newly downloaded profile is used for that launch.
+The included agent mappings use the explicit signed pack profiles
+`nolabs-ai/claude`, `nolabs-ai/codex`, and `nolabs-ai/opencode`, preventing a
+same-named local profile from silently shadowing a pack. To intentionally use a
+refreshed local profile, change that agent's `Profile` mapping to the local
+profile name after validating the downloaded file.
 
 ### Optional arguments
 

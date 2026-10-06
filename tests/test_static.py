@@ -162,6 +162,8 @@ class LaunchpadStaticTests(unittest.TestCase):
     def test_security_and_folder_invariants_remain(self):
         self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 3)
         self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
+        for profile in ("nolabs-ai/claude", "nolabs-ai/codex", "nolabs-ai/opencode"):
+            self.assertIn(f"Profile = '{profile}'", SCRIPT)
         self.assertIn("LinuxUser         = 'nono'", SCRIPT)
         self.assertEqual(
             SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"),
