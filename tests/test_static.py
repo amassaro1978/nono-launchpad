@@ -160,7 +160,7 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertRegex(README, r"does not\s+display or log `PATH`")
 
     def test_security_and_folder_invariants_remain(self):
-        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 3)
+        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')"), 3)
         self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
         self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
         self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)

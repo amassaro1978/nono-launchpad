@@ -96,19 +96,19 @@ $Config = @{
         'Claude Code' = @{
             Profile = 'claude'
             Command = 'claude'
-            NonoArguments = @('--allow-cwd')
+            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
             AgentArguments = @()
         }
         'Codex' = @{
             Profile = 'codex'
             Command = 'codex'
-            NonoArguments = @('--allow-cwd')
+            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
             AgentArguments = @()
         }
         'OpenCode' = @{
             Profile = 'opencode'
             Command = 'opencode'
-            NonoArguments = @('--allow-cwd')
+            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
             AgentArguments = @()
         }
         # 'Future Agent' = @{
