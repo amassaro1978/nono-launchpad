@@ -55,6 +55,7 @@ $ErrorActionPreference = 'Stop'
 # Do not place credentials in URLs; use the WSL user's approved curl auth.
 $Config = @{
     Distro            = 'Nono-1-0-0'
+    LinuxUser         = 'nono'
     ProjectRoot       = 'projects' # relative to the WSL user's $HOME
     DefaultAgent      = 'OpenCode'
     # Match Open Shell by loading the interactive login environment for both
@@ -96,19 +97,19 @@ $Config = @{
         'Claude Code' = @{
             Profile = 'claude'
             Command = 'claude'
-            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'Codex' = @{
             Profile = 'codex'
             Command = 'codex'
-            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         'OpenCode' = @{
             Profile = 'opencode'
             Command = 'opencode'
-            NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')
+            NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
         # 'Future Agent' = @{
@@ -123,6 +124,7 @@ $Config = @{
 
 function Assert-Configuration {
     if ($Config.Distro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'Unsafe Distro setting.' }
+    if ($Config.LinuxUser -notmatch '^[a-z_][a-z0-9_-]{0,31}$') { throw 'Unsafe LinuxUser setting.' }
     if ($Config.ProjectRoot -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Unsafe ProjectRoot setting.' }
     if ($Config.UseInteractiveAgentShell -isnot [bool]) { throw 'UseInteractiveAgentShell must be true or false.' }
     if ($Config.CredentialVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'CredentialVariable must be a valid environment-variable name.' }
@@ -234,7 +236,7 @@ function Invoke-WslText {
         [switch]$UseAgentShell
     )
     $bashArguments = @(Get-BashCommandArguments -LinuxScript $LinuxScript -UseAgentShell:$UseAgentShell)
-    $output = & wsl.exe -d $Config.Distro -- bash @bashArguments 2>&1
+    $output = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments 2>&1
     if ($LASTEXITCODE -ne 0) {
         if ($UseAgentShell) {
             throw "WSL agent-environment check failed with exit code $LASTEXITCODE."
@@ -386,7 +388,7 @@ function Invoke-AgentInCurrentConsole {
     $linuxScript = @(
         '#!/usr/bin/env bash'
         'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
-        'export PATH="/home/nono/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"'
+        'export PATH="$HOME/.local/bin:$PATH"'
         "cd `"`$HOME/$root/$ProjectName`" || exit 20"
     ) + $remoteRefreshLines + @(
         "exec $quotedLaunch"
@@ -403,7 +405,7 @@ function Invoke-AgentInCurrentConsole {
     try {
         # The bootstrap, base64 text, and path contain no credential. set -C
         # rejects the already-improbable case where the random path exists.
-        & wsl.exe -d $Config.Distro -- bash -c $createBootstrap
+        & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $createBootstrap
         $creationExitCode = $LASTEXITCODE
         if ($creationExitCode -ne 0) {
             throw "Could not create the temporary WSL launch script (exit code $creationExitCode)."
@@ -417,7 +419,7 @@ function Invoke-AgentInCurrentConsole {
             Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
             Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
             Write-Host ''
-            & wsl.exe -d $Config.Distro -- bash @bashArguments
+            & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
             $exitCode = $LASTEXITCODE
             if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
         }
@@ -425,7 +427,7 @@ function Invoke-AgentInCurrentConsole {
     finally {
         # Normally the script removes itself before exec. This handles creation,
         # startup, and self-delete failures without masking the launch result.
-        try { $null = & wsl.exe -d $Config.Distro -- rm -f -- $temporaryLinuxPath 2>$null }
+        try { $null = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- rm -f -- $temporaryLinuxPath 2>$null }
         catch { }
     }
 }
@@ -445,7 +447,7 @@ function Open-ShellInCurrentConsole {
     $linux = $linux -join "`n"
     $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
     Invoke-WithCredentialEnvironment {
-        & wsl.exe -d $Config.Distro -- bash @bashArguments
+        & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
     }
 }
 

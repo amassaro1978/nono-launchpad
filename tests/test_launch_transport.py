@@ -25,18 +25,18 @@ def text_region(start: str, end: str) -> str:
 
 
 class ProtectedRegionTests(unittest.TestCase):
-    """Hashes are snapshots from d318bf8, except intentionally changed regions."""
+    """Hashes guard non-launch regions; intentional user-context edits refresh snapshots."""
 
     EXPECTED = {
         "Invoke-WslText": (
             b"function Invoke-WslText {",
             b"function Test-DistroRegistered {",
-            "5018a4cdb28508717df03de4b56403a1f8b0b36bf818af4f13b56e80c5638a36",
+            "2c5892a416e5db27cce25138d3108239c3f5f5489508c4aa5bfb3b446cdaa4ea",
         ),
         "Open-ShellInCurrentConsole": (
             b"function Open-ShellInCurrentConsole {",
             b"if ($Mode -eq 'Launch') {",
-            "1a6b27fa5c3fde23288946fd57a3813532c11e6bd125c188383a56e472a14954",
+            "64f15e48fcf4ddf4a30c3c04a9345dd35ea58d9e634e7dd12e0b13bae3a9ab8b",
         ),
         "Refresh-Projects": (
             b"function Refresh-Projects {",

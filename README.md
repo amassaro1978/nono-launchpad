@@ -100,8 +100,9 @@ internal-Git HTTPS URLs are supplied.
 ```
 
 Keep destinations below `~/`; the launchpad resolves that prefix against the
-default user's WSL home directory. Do not embed usernames, tokens, or other
-credentials in a URL. If the internal Git service requires authentication,
+home directory of the explicitly configured `LinuxUser` (default: `nono`). Every
+operational WSL call passes `-u LinuxUser` rather than trusting the distro's
+default user. Do not embed usernames, tokens, or other credentials in a URL. If the internal Git service requires authentication,
 configure an approved non-interactive `curl` authentication mechanism for the
 Linux user separately. `CurlConnectTimeoutSeconds` and `CurlMaxTimeSeconds` in
 the same settings block bound how long each attempted refresh may delay startup.
@@ -200,8 +201,8 @@ creation bootstrap because `wsl.exe` does not reliably preserve extra
 positional arguments supplied after `bash -c` by Windows PowerShell 5.1.
 The file removes itself before `exec nono`; the Windows helper also attempts
 cleanup in a `finally` block. Creation must succeed before the agent starts.
-The six configured refresh operations run from this script as the default WSL
-Linux user after entering the selected project and immediately before `nono`.
+The six configured refresh operations run from this script as the configured
+`LinuxUser` after entering the selected project and immediately before `nono`.
 Project listing/creation remains unaffected by this Launch-only transport.
 **Open Shell** runs the same refresh function through its existing command
 transport before handing control to Bash. It continues to use the same DPAPI

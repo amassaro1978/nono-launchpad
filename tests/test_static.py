@@ -86,7 +86,7 @@ class LaunchpadStaticTests(unittest.TestCase):
             self.assertIn(reason, SCRIPT)
 
     def test_agent_and_profile_validation_is_deferred_to_real_launch(self):
-        self.assertIn('export PATH="/home/nono/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"', SCRIPT)
+        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
         self.assertNotIn("command -v $commandLiteral", SCRIPT)
         self.assertNotIn("nono profile show $profileLiteral --json", SCRIPT)
         self.assertIn("Agent executable and profile: validated by Launch", SCRIPT)
@@ -128,7 +128,7 @@ class LaunchpadStaticTests(unittest.TestCase):
             "if ($Mode -eq 'Launch') {", 1
         )[0]
         wrapper = open_shell.index("Invoke-WithCredentialEnvironment {")
-        wsl = open_shell.index("& wsl.exe -d $Config.Distro -- bash @bashArguments")
+        wsl = open_shell.index("& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments")
         self.assertLess(wrapper, wsl)
         self.assertNotIn("CredentialVariable", open_shell)
         self.assertNotIn("Write-Host", open_shell)
@@ -160,8 +160,13 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertRegex(README, r"does not\s+display or log `PATH`")
 
     def test_security_and_folder_invariants_remain(self):
-        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd', '--read', '/home/nono/.local')"), 3)
+        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 3)
         self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
+        self.assertIn("LinuxUser         = 'nono'", SCRIPT)
+        self.assertEqual(
+            SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"),
+            5,
+        )
         self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
         self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
         self.assertIn("$parts += \"$variableName/u\"", SCRIPT)
