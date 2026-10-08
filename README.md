@@ -46,7 +46,7 @@ The encrypted value is stored at:
 
 ### Agent shell initialization
 
-Readiness and actual agent launch use the same Bash initialization mode:
+Agent launch and **Open Shell** use the same Bash initialization mode:
 
 ```powershell
 UseInteractiveAgentShell = $true
@@ -54,7 +54,7 @@ UseInteractiveAgentShell = $true
 
 The default starts an interactive login shell, matching the environment that
 works through **Open Shell**. This allows user startup files to supply the same
-non-secret `PATH` customizations for readiness and launch. Set it to `$false`
+non-secret `PATH` customizations for shell and launch. Set it to `$false`
 only when the managed environment intentionally requires a minimal,
 noninteractive login shell.
 
@@ -66,7 +66,7 @@ executable locations.
 
 ### Configurable agent defaults
 
-The included mappings target the three local profiles refreshed before launch. Their names match the JSON filenames under `~/.config/nono/profiles/` without the `.json` extension.
+The included mappings target the three local profiles refreshed before launch. Their names match the JSONC filenames under `~/.config/nono/profiles/` without the `.jsonc` extension.
 
 ```powershell
 'Claude Code' = @{
@@ -95,9 +95,14 @@ internal-Git HTTPS URLs are supplied.
 ```powershell
 'Claude nono profile' = @{
     Url = ''
-    Destination = '~/.config/nono/profiles/claude.json'
+    Destination = '~/.config/nono/profiles/claude.jsonc'
 }
 ```
+
+The three Nono profile destinations are `claude.jsonc`, `codex.jsonc`, and
+`opencode.jsonc`. OpenCode's application config is separately refreshed at
+`~/.config/opencode/opencode.jsonc`; the Claude and Codex application configs
+remain `~/.claude/settings.json` and `~/.codex/config.toml`.
 
 Keep destinations below `~/`; the launchpad resolves that prefix against the
 home directory of the explicitly configured `LinuxUser` (default: `nono`). Every
@@ -175,18 +180,16 @@ Then:
 4. Review **Readiness** and choose **Launch Selected Agent**.
 
 The launch area remains docked at the bottom of the window. Its named status
-banner states every current reason when launch is unavailable: missing
-credential, distro, `nono`, selected agent executable, project selection, or a
-profile that was checked and could not be resolved. The same reason is on the
-disabled button's tooltip. Agent or project selection changes refresh the
+banner states every current structural reason when launch is unavailable:
+missing credential, distro, configured agent selection, or project selection.
+The same reason is on the disabled button's tooltip. Agent or project selection changes refresh the
 banner immediately.
 
 The main content scrolls independently above the launch area. The initial,
 minimum, and maximum window dimensions are bounded by the current Windows work
 area in display-independent units, so display scaling or a small laptop screen
-does not make the launch status and button unreachable. Executable checks and
-launches prepend `~/.local/bin` to the WSL `PATH`, matching common per-user
-installs.
+does not make the launch status and button unreachable. Agent launches prepend
+`~/.local/bin` to the WSL `PATH`, matching common per-user installs.
 
 **Open Folder** is intended to open Windows File Explorer directly at the
 selected Linux-native project. It constructs the selected distro's WSL UNC
@@ -195,22 +198,38 @@ Explorer view is not.
 
 The launch opens in Windows Terminal when `wt.exe` is available, otherwise in a separate Windows PowerShell console.
 
-For Launch only, the helper transfers the generated non-secret Bash program as
-UTF-8 base64 into a cryptographically named file under WSL `/tmp`, sets mode
-`700`, and starts Bash with only login/interactive flags and that file path.
+For both Launch and **Open Shell**, the helper transfers the generated
+non-secret Bash program as UTF-8 base64 into a cryptographically named file
+under WSL `/tmp`, sets mode `700`, and starts Bash with only login/interactive
+flags and that file path.
 The shell-safe base64 payload and random path are placed directly in the fixed
-creation bootstrap because `wsl.exe` does not reliably preserve extra
-positional arguments supplied after `bash -c` by Windows PowerShell 5.1.
-The file removes itself before `exec nono`; the Windows helper also attempts
-cleanup in a `finally` block. Creation must succeed before the agent starts.
+creation bootstrap because Windows PowerShell 5.1 native-argument serialization
+and `wsl.exe` command-shell handling do not reliably preserve a multiline
+program supplied after `bash -c`. The extra parsing pass can remove quoting and
+expand variables intended for the inner Bash program. In Open Shell, that made
+`$directory` empty before `refresh_file` ran, so each of the six configured
+refreshes reached `mkdir -p --` without an operand. Transferring the program as
+file content leaves only shell-safe bootstrap text and the script path on the
+Windows-to-WSL command line.
+Each generated file removes itself before its final `exec` (`nono` or Bash);
+the Windows helper also attempts cleanup in a `finally` block. Creation must
+succeed before the requested operation starts.
 The six configured refresh operations run from this script as the configured
-`LinuxUser` after entering the selected project and immediately before `nono`.
-Project listing/creation remains unaffected by this Launch-only transport.
-**Open Shell** runs the same refresh function through its existing command
-transport before handing control to Bash. It continues to use the same DPAPI
-decryption and process-scoped `WSLENV` injection wrapper as agent launch, so the
-configured credential is available to refresh commands, the shell, and its
-descendants without being placed in the command line or written to disk.
+`LinuxUser` after entering the selected project and immediately before `nono`
+or the Open Shell handoff. For Claude Code launches, the same pre-sandbox
+script also creates `/tmp/claude-$(id -u)`, rejects a symlink or a directory not
+owned by the configured user, applies mode `700`, and verifies read, write, and
+search access. This must happen before `nono run`: after a reboot clears `/tmp`,
+the Claude profile cannot grant access to a path that does not yet exist when
+Nono builds its sandbox. A stale path with unsafe ownership fails visibly
+instead of invoking `sudo`, changing ownership, or weakening its permissions.
+Project listing/creation remains unaffected by this transport. Using a script
+file for Open Shell prevents Windows PowerShell 5.1 and `wsl.exe` argument
+processing from expanding or dropping Bash variables in the multiline refresh
+program. Both entry points use the same DPAPI decryption
+and process-scoped `WSLENV` injection wrapper, so the configured credential is
+available to refresh commands, the shell, and its descendants without being
+placed in the command line or written to disk.
 
 ## Static checks
 
@@ -221,9 +240,9 @@ python3 -m unittest -v tests/test_static.py tests/test_launch_transport.py
 ```
 
 These checks parse the embedded XAML and guard the responsive layout, named
-launch-status controls, direct agent/profile readiness checks, folder
+launch-status controls, structural readiness checks, folder
 targeting, launch/Open Shell remote-file fallback and atomic replacement
-structure, Launch-only script transport, Open Shell credential wrapping,
+structure, shared temporary-script transport, Open Shell credential wrapping,
 unchanged project-management regions, and security-sensitive defaults. They do
 not replace a Windows PowerShell 5.1/WPF/WSL runtime test.
 
@@ -255,13 +274,12 @@ To remove the stored credential, close all launchpad and agent windows and delet
 selected profile, nono may prompt for project access or require additional
 approved options.
 
-A green readiness result confirms only that the distro, configured executable,
-and resolvable profile are present. It does not certify the profile's effective
-permissions or runtime behavior. Validate each profile strictly, review its
-effective filesystem and network policy, and perform a real read/write launch
-test for every configured agent before deployment.
-
-Readiness checks each configured profile directly with `nono profile show`.
+A green readiness result confirms only that the distro, credential, selected
+project, and configured agent selection are structurally ready. It does not
+certify executable or profile availability, effective permissions, or runtime
+behavior. Validate each profile strictly, review its effective filesystem and
+network policy, and perform a real read/write launch test for every configured
+agent before deployment.
 
 The Launch button is enabled when the credential, distro, selected project,
 and configured agent selection are valid. The launched terminal is the

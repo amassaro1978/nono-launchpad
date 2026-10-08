@@ -68,15 +68,15 @@ $Config = @{
     RemoteFiles       = [ordered]@{
         'Claude nono profile' = @{
             Url = ''
-            Destination = '~/.config/nono/profiles/claude.json'
+            Destination = '~/.config/nono/profiles/claude.jsonc'
         }
         'Codex nono profile' = @{
             Url = ''
-            Destination = '~/.config/nono/profiles/codex.json'
+            Destination = '~/.config/nono/profiles/codex.jsonc'
         }
         'OpenCode nono profile' = @{
             Url = ''
-            Destination = '~/.config/nono/profiles/opencode.json'
+            Destination = '~/.config/nono/profiles/opencode.jsonc'
         }
         'Claude config' = @{
             Url = ''
@@ -88,7 +88,7 @@ $Config = @{
         }
         'OpenCode config' = @{
             Url = ''
-            Destination = '~/.config/opencode/opencode.json'
+            Destination = '~/.config/opencode/opencode.jsonc'
         }
     }
     # Configurable local profiles refreshed above before each launch.
@@ -357,6 +357,50 @@ function Get-RemoteRefreshScriptLines {
     return $lines
 }
 
+function Invoke-GeneratedLinuxScript {
+    param(
+        [Parameter(Mandatory)][string]$LinuxScript,
+        [Parameter(Mandatory)][string]$OperationName,
+        [switch]$UseAgentShell,
+        [switch]$CheckExecutionExitCode
+    )
+    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LinuxScript))
+    $temporaryLinuxPath = New-CryptographicLaunchTempPath
+    # WinPS 5.1 native-argument serialization plus wsl.exe's command-shell
+    # pass do not reliably preserve multiline bash -c text. That extra parse
+    # can expand variables intended for the generated script (for example,
+    # $directory) before its Bash function runs. Base64 and the generated path
+    # are restricted to shell-safe characters, so insert them directly without
+    # nested quoting.
+    $createBootstrap = "umask 077; set -C; printf %s $encodedScript | base64 -d > $temporaryLinuxPath && chmod 700 $temporaryLinuxPath"
+
+    try {
+        # The bootstrap, base64 text, and path contain no credential. set -C
+        # rejects the already-improbable case where the random path exists.
+        & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $createBootstrap
+        $creationExitCode = $LASTEXITCODE
+        if ($creationExitCode -ne 0) {
+            throw "Could not create the temporary WSL script for $OperationName (exit code $creationExitCode)."
+        }
+
+        $bashArguments = @('-l')
+        if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $bashArguments += '-i' }
+        $bashArguments += $temporaryLinuxPath
+
+        Invoke-WithCredentialEnvironment {
+            & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
+            $exitCode = $LASTEXITCODE
+            if ($CheckExecutionExitCode -and $exitCode -ne 0) { throw "$OperationName exited with code $exitCode." }
+        }
+    }
+    finally {
+        # Normally the script removes itself before its final exec. This handles
+        # creation, startup, and self-delete failures without masking the result.
+        try { $null = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- rm -f -- $temporaryLinuxPath 2>$null }
+        catch { }
+    }
+}
+
 function Invoke-AgentInCurrentConsole {
     param(
         [Parameter(Mandatory)][string]$AgentName,
@@ -385,51 +429,33 @@ function Invoke-AgentInCurrentConsole {
     # A script file avoids passing the generated command through bash -c after
     # PowerShell 5.1 and wsl.exe have each performed argument processing.
     $remoteRefreshLines = @(Get-RemoteRefreshScriptLines)
+    $agentPreparationLines = @()
+    if ([string]$agentConfig.Command -eq 'claude') {
+        # The Claude nono profile can grant access to this path only when it
+        # exists before `nono run` builds the sandbox. /tmp is cleared on reboot.
+        $agentPreparationLines = @(
+            'claude_temp="/tmp/claude-$(id -u)"'
+            'if ! mkdir -p -- "$claude_temp" || [ -L "$claude_temp" ] || ! [ -d "$claude_temp" ] || ! [ -O "$claude_temp" ] ||'
+            '   ! chmod 700 "$claude_temp" || ! [ -r "$claude_temp" ] || ! [ -w "$claude_temp" ] || ! [ -x "$claude_temp" ]; then'
+            '  printf ''%s\n'' "Unable to prepare secure Claude temporary directory $claude_temp (expected current-user ownership and mode 700)." >&2'
+            '  exit 22'
+            'fi'
+        )
+    }
     $linuxScript = @(
         '#!/usr/bin/env bash'
         'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
         'export PATH="$HOME/.local/bin:$PATH"'
         "cd `"`$HOME/$root/$ProjectName`" || exit 20"
-    ) + $remoteRefreshLines + @(
+    ) + $remoteRefreshLines + $agentPreparationLines + @(
         "exec $quotedLaunch"
     )
     $linuxScript = $linuxScript -join "`n"
     $linuxScript += "`n"
-    $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($linuxScript))
-    $temporaryLinuxPath = New-CryptographicLaunchTempPath
-    # WinPS 5.1 -> wsl.exe does not reliably preserve bash -c positional
-    # arguments. Base64 and the generated path are restricted to shell-safe
-    # characters, so insert them directly without nested quoting.
-    $createBootstrap = "umask 077; set -C; printf %s $encodedScript | base64 -d > $temporaryLinuxPath && chmod 700 $temporaryLinuxPath"
-
-    try {
-        # The bootstrap, base64 text, and path contain no credential. set -C
-        # rejects the already-improbable case where the random path exists.
-        & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $createBootstrap
-        $creationExitCode = $LASTEXITCODE
-        if ($creationExitCode -ne 0) {
-            throw "Could not create the temporary WSL launch script (exit code $creationExitCode)."
-        }
-
-        $bashArguments = @('-l')
-        if ($Config.UseInteractiveAgentShell) { $bashArguments += '-i' }
-        $bashArguments += $temporaryLinuxPath
-
-        Invoke-WithCredentialEnvironment {
-            Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
-            Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
-            Write-Host ''
-            & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
-            $exitCode = $LASTEXITCODE
-            if ($exitCode -ne 0) { throw "The sandboxed agent exited with code $exitCode." }
-        }
-    }
-    finally {
-        # Normally the script removes itself before exec. This handles creation,
-        # startup, and self-delete failures without masking the launch result.
-        try { $null = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- rm -f -- $temporaryLinuxPath 2>$null }
-        catch { }
-    }
+    Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
+    Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
+    Write-Host ''
+    Invoke-GeneratedLinuxScript -LinuxScript $linuxScript -OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode
 }
 
 function Open-ShellInCurrentConsole {
@@ -443,12 +469,14 @@ function Open-ShellInCurrentConsole {
         if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
         $changeDirectory = "cd `"`$HOME/$root/$ProjectName`" || exit 20"
     }
-    $linux = @($changeDirectory) + @(Get-RemoteRefreshScriptLines) + @('exec bash -l')
+    $linux = @(
+        '#!/usr/bin/env bash'
+        'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary shell script.'' >&2; exit 21; }'
+        $changeDirectory
+    ) + @(Get-RemoteRefreshScriptLines) + @('exec bash -l')
     $linux = $linux -join "`n"
-    $bashArguments = @(Get-BashCommandArguments -LinuxScript $linux -UseAgentShell)
-    Invoke-WithCredentialEnvironment {
-        & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
-    }
+    $linux += "`n"
+    Invoke-GeneratedLinuxScript -LinuxScript $linux -OperationName 'The WSL shell' -UseAgentShell
 }
 
 if ($Mode -eq 'Launch') {

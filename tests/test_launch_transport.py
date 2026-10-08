@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Focused regression tests for the Launch-only WSL script transport."""
+"""Focused regression tests for the shared Launch/Open Shell WSL transport."""
 
 import base64
 import hashlib
@@ -33,11 +33,6 @@ class ProtectedRegionTests(unittest.TestCase):
             b"function Test-DistroRegistered {",
             "2c5892a416e5db27cce25138d3108239c3f5f5489508c4aa5bfb3b446cdaa4ea",
         ),
-        "Open-ShellInCurrentConsole": (
-            b"function Open-ShellInCurrentConsole {",
-            b"if ($Mode -eq 'Launch') {",
-            "64f15e48fcf4ddf4a30c3c04a9345dd35ea58d9e634e7dd12e0b13bae3a9ab8b",
-        ),
         "Refresh-Projects": (
             b"function Refresh-Projects {",
             b"function Refresh-Readiness {",
@@ -65,17 +60,25 @@ class ProtectedRegionTests(unittest.TestCase):
 class LaunchTransportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.transport = text_region(
+            "function Invoke-GeneratedLinuxScript {",
+            "function Invoke-AgentInCurrentConsole {",
+        )
         cls.launch = text_region(
             "function Invoke-AgentInCurrentConsole {",
             "function Open-ShellInCurrentConsole {",
         )
+        cls.open_shell = text_region(
+            "function Open-ShellInCurrentConsole {",
+            "if ($Mode -eq 'Launch') {",
+        )
         cls.path_helper = text_region(
             "function New-CryptographicLaunchTempPath {",
-            "function Invoke-AgentInCurrentConsole {",
+            "function Get-RemoteRefreshScriptLines {",
         )
         cls.script_builder = text_region(
             "    $linuxScript = @(",
-            "    $encodedScript = ",
+            "    Write-Host \"Launching $AgentName",
         )
 
     def test_temp_path_is_cryptographically_random_and_shell_safe(self):
@@ -87,66 +90,123 @@ class LaunchTransportTests(unittest.TestCase):
         self.assertNotIn("Get-Random", self.path_helper)
 
     def test_creation_uses_utf8_base64_noclobber_and_mode_700(self):
-        self.assertIn("[Text.Encoding]::UTF8.GetBytes($linuxScript)", self.launch)
-        self.assertIn("umask 077; set -C;", self.launch)
-        self.assertIn("base64 -d", self.launch)
-        self.assertIn("chmod 700 $temporaryLinuxPath", self.launch)
-        bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.launch).group(1)
+        self.assertIn("[Text.Encoding]::UTF8.GetBytes($LinuxScript)", self.transport)
+        self.assertIn("umask 077; set -C;", self.transport)
+        self.assertIn("base64 -d", self.transport)
+        self.assertIn("chmod 700 $temporaryLinuxPath", self.transport)
+        bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.transport).group(1)
         self.assertNotIn('"', bootstrap)
         self.assertIn(
             "bash -c $createBootstrap",
-            self.launch,
+            self.transport,
         )
-        self.assertNotIn("bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath", self.launch)
-        self.assertNotIn("printf %s $1", self.launch)
-        self.assertNotIn("chmod 700 $2", self.launch)
+        self.assertNotIn("bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath", self.transport)
+        self.assertNotIn("printf %s $1", self.transport)
+        self.assertNotIn("chmod 700 $2", self.transport)
 
     def test_creation_exit_is_checked_before_credentialed_launch(self):
-        capture = self.launch.index("$creationExitCode = $LASTEXITCODE")
-        check = self.launch.index("if ($creationExitCode -ne 0)")
-        launch = self.launch.index("Invoke-WithCredentialEnvironment")
+        capture = self.transport.index("$creationExitCode = $LASTEXITCODE")
+        check = self.transport.index("if ($creationExitCode -ne 0)")
+        launch = self.transport.index("Invoke-WithCredentialEnvironment")
         self.assertLess(capture, check)
         self.assertLess(check, launch)
 
     def test_launch_bash_argv_is_simple_and_excludes_generated_command(self):
-        argv = text_region(
+        argv = self.transport[
+            self.transport.index(
             "        $bashArguments = @('-l')",
-            "        Invoke-WithCredentialEnvironment",
-        )
-        self.assertIn("$bashArguments += '-i'", argv)
+            ) : self.transport.index("        Invoke-WithCredentialEnvironment")
+        ]
+        self.assertIn("$UseAgentShell -and $Config.UseInteractiveAgentShell", argv)
         self.assertIn("$bashArguments += $temporaryLinuxPath", argv)
         self.assertNotIn("$linuxScript", argv)
         self.assertNotIn("$quotedLaunch", argv)
         self.assertNotIn("'-c'", argv)
-        self.assertIn("bash @bashArguments", self.launch)
+        self.assertIn("bash @bashArguments", self.transport)
+
+    def test_launch_and_open_shell_both_use_shared_transport(self):
+        self.assertIn(
+            "Invoke-GeneratedLinuxScript -LinuxScript $linuxScript -OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode",
+            self.launch,
+        )
+        self.assertIn(
+            "Invoke-GeneratedLinuxScript -LinuxScript $linux -OperationName 'The WSL shell' -UseAgentShell",
+            self.open_shell,
+        )
+        self.assertNotIn("Get-BashCommandArguments", self.open_shell)
+        self.assertNotIn("bash -c", self.open_shell)
+        self.assertNotIn("CheckExecutionExitCode", self.open_shell)
+
+    def test_refresh_variables_never_cross_the_windows_wsl_command_line(self):
+        refresh = text_region(
+            "function Get-RemoteRefreshScriptLines {",
+            "function Invoke-GeneratedLinuxScript {",
+        )
+        for marker in ("$1", "${destination%/*}", '"$directory"'):
+            self.assertIn(marker, refresh)
+
+        bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.transport).group(1)
+        for marker in ("$1", "${destination%/*}", "$directory", "refresh_file"):
+            self.assertNotIn(marker, bootstrap)
+        self.assertIn("$encodedScript", bootstrap)
+        self.assertIn("$temporaryLinuxPath", bootstrap)
+
+        self.assertRegex(
+            (ROOT / "README.md").read_text(encoding="utf-8"),
+            r"each of the six configured\s+refreshes reached `mkdir -p --` without an operand",
+        )
+
+    def test_claude_temp_directory_exists_before_nono_builds_its_sandbox(self):
+        self.assertIn("if ([string]$agentConfig.Command -eq 'claude')", self.launch)
+        for marker in (
+            'claude_temp="/tmp/claude-$(id -u)"',
+            'mkdir -p -- "$claude_temp"',
+            '[ -L "$claude_temp" ]',
+            '[ -O "$claude_temp" ]',
+            'chmod 700 "$claude_temp"',
+            '[ -r "$claude_temp" ]',
+            '[ -w "$claude_temp" ]',
+            '[ -x "$claude_temp" ]',
+            'exit 22',
+        ):
+            self.assertIn(marker, self.launch)
+        self.assertNotIn("chown", self.launch)
+        self.assertNotIn("sudo", self.launch)
+        self.assertLess(self.script_builder.index("$agentPreparationLines"),
+                        self.script_builder.index('"exec $quotedLaunch"'))
 
     def test_script_self_deletes_before_exec_and_finally_cleans_up(self):
         self.assertLess(self.script_builder.index('rm -f -- \"$0\"'),
                         self.script_builder.index('"exec $quotedLaunch"'))
         self.assertLess(self.script_builder.index("$remoteRefreshLines"),
+                        self.script_builder.index("$agentPreparationLines"))
+        self.assertLess(self.script_builder.index("$agentPreparationLines"),
                         self.script_builder.index('"exec $quotedLaunch"'))
-        self.assertIn("rm -f -- $temporaryLinuxPath", self.launch)
+        self.assertLess(self.open_shell.index('rm -f -- "$0"'),
+                        self.open_shell.index("@('exec bash -l')"))
+        self.assertIn("rm -f -- $temporaryLinuxPath", self.transport)
         self.assertRegex(
-            self.launch,
+            self.transport,
             r"finally \{\n(?:.|\n)*?try \{ \$null = & wsl\.exe .*? rm -f -- \$temporaryLinuxPath",
         )
 
     def test_cleanup_covers_creation_and_launch_failures(self):
-        outer_try = self.launch.index("    try {\n        # The bootstrap")
-        creation = self.launch.index("bash -c $createBootstrap", outer_try)
-        launch = self.launch.index("bash @bashArguments", creation)
-        cleanup = self.launch.index("    finally {", launch)
+        outer_try = self.transport.index("    try {\n        # The bootstrap")
+        creation = self.transport.index("bash -c $createBootstrap", outer_try)
+        launch = self.transport.index("bash @bashArguments", creation)
+        cleanup = self.transport.index("    finally {", launch)
         self.assertLess(outer_try, creation)
         self.assertLess(creation, launch)
         self.assertLess(launch, cleanup)
-        self.assertIn("catch { }", self.launch[cleanup:])
+        self.assertIn("catch { }", self.transport[cleanup:])
 
     def test_credential_is_neither_embedded_nor_printed_by_transport(self):
         for forbidden in ("CredentialVariable", "$plain", "PROXY_API_KEY", "Write-Host $encodedScript"):
             self.assertNotIn(forbidden, self.script_builder)
-        self.assertIn("Invoke-WithCredentialEnvironment", self.launch)
+        self.assertIn("Invoke-WithCredentialEnvironment", self.transport)
         self.assertNotIn("Write-Host $linuxScript", self.launch)
-        self.assertNotIn("Write-Host $temporaryLinuxPath", self.launch)
+        self.assertNotIn("Write-Host $temporaryLinuxPath", self.transport)
+        self.assertNotIn("CredentialVariable", self.open_shell)
 
     def test_ascii_quotes_and_semicolons_survive_base64_round_trip(self):
         sample = (
@@ -158,7 +218,7 @@ class LaunchTransportTests(unittest.TestCase):
         encoded = base64.b64encode(sample.encode("utf-8")).decode("ascii")
         self.assertRegex(encoded, r"^[A-Za-z0-9+/]+={0,2}$")
         self.assertEqual(sample, base64.b64decode(encoded).decode("utf-8"))
-        self.assertIn("[Convert]::ToBase64String", self.launch)
+        self.assertIn("[Convert]::ToBase64String", self.transport)
 
 
 if __name__ == "__main__":

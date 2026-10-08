@@ -118,23 +118,29 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("function Get-BashCommandArguments", SCRIPT)
         self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
         self.assertIn("$arguments += '-i'", SCRIPT)
-        self.assertIn("if ($Config.UseInteractiveAgentShell) { $bashArguments += '-i' }", SCRIPT)
+        self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $bashArguments += '-i' }", SCRIPT)
         self.assertIn("$bashArguments += $temporaryLinuxPath", SCRIPT)
-        self.assertIn("Get-BashCommandArguments -LinuxScript $linux -UseAgentShell", SCRIPT)
+        self.assertEqual(SCRIPT.count("Invoke-GeneratedLinuxScript -LinuxScript"), 2)
+        self.assertIn("-OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode", SCRIPT)
+        self.assertIn("-OperationName 'The WSL shell' -UseAgentShell", SCRIPT)
         self.assertNotIn("-- bash -lc $linux", SCRIPT)
 
     def test_open_shell_uses_credential_environment_wrapper(self):
+        transport = SCRIPT.split("function Invoke-GeneratedLinuxScript {", 1)[1].split(
+            "function Invoke-AgentInCurrentConsole {", 1
+        )[0]
         open_shell = SCRIPT.split("function Open-ShellInCurrentConsole {", 1)[1].split(
             "if ($Mode -eq 'Launch') {", 1
         )[0]
-        wrapper = open_shell.index("Invoke-WithCredentialEnvironment {")
-        wsl = open_shell.index("& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments")
+        wrapper = transport.index("Invoke-WithCredentialEnvironment {")
+        wsl = transport.index("& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments")
         self.assertLess(wrapper, wsl)
+        self.assertIn("Invoke-GeneratedLinuxScript", open_shell)
         self.assertNotIn("CredentialVariable", open_shell)
         self.assertNotIn("Write-Host", open_shell)
         self.assertRegex(
             README,
-            r"same DPAPI\s+decryption and process-scoped `WSLENV` injection wrapper",
+            r"same DPAPI\s+decryption\s+and process-scoped `WSLENV` injection wrapper",
         )
 
     def test_open_shell_runs_the_same_refresh_before_shell_handoff(self):
@@ -144,10 +150,11 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("@(Get-RemoteRefreshScriptLines)", open_shell)
         assembly = open_shell.index("@(Get-RemoteRefreshScriptLines)")
         handoff = open_shell.index("@('exec bash -l')")
-        wrapper = open_shell.index("Invoke-WithCredentialEnvironment {")
-        execution = open_shell.index("bash @bashArguments")
+        execution = open_shell.index("Invoke-GeneratedLinuxScript")
         self.assertLess(assembly, handoff)
-        self.assertLess(wrapper, execution)
+        self.assertLess(handoff, execution)
+        self.assertIn('rm -f -- "$0"', open_shell)
+        self.assertNotIn("Get-BashCommandArguments", open_shell)
 
     def test_readiness_avoids_shell_probe_and_path_diagnostics(self):
         self.assertNotIn("__NONO_LAUNCHPAD_READINESS__", SCRIPT)
@@ -165,7 +172,7 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("LinuxUser         = 'nono'", SCRIPT)
         self.assertEqual(
             SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"),
-            5,
+            4,
         )
         self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
         self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
@@ -198,6 +205,17 @@ class LaunchpadStaticTests(unittest.TestCase):
         destinations = [destination for _, _, destination in entries]
         self.assertTrue(all(destination.startswith("~/") for destination in destinations))
         self.assertEqual(len(set(destinations)), 6)
+        self.assertEqual(
+            set(destinations),
+            {
+                "~/.config/nono/profiles/claude.jsonc",
+                "~/.config/nono/profiles/codex.jsonc",
+                "~/.config/nono/profiles/opencode.jsonc",
+                "~/.claude/settings.json",
+                "~/.codex/config.toml",
+                "~/.config/opencode/opencode.jsonc",
+            },
+        )
         self.assertIn("if ($Config.RemoteFiles.Count -ne 6)", SCRIPT)
         self.assertIn("must use an HTTPS URL without embedded credentials", SCRIPT)
         self.assertIn("has a whitespace-only Url", SCRIPT)
@@ -230,8 +248,12 @@ class LaunchpadStaticTests(unittest.TestCase):
                         script_builder.index("$remoteRefreshLines"))
         self.assertLess(script_builder.index("$remoteRefreshLines"),
                         script_builder.index('"exec $quotedLaunch"'))
-        self.assertLess(launch.index("Invoke-WithCredentialEnvironment"),
-                        launch.index("bash @bashArguments"))
+        self.assertIn("Invoke-GeneratedLinuxScript -LinuxScript $linuxScript", launch)
+        transport = SCRIPT.split("function Invoke-GeneratedLinuxScript {", 1)[1].split(
+            "function Invoke-AgentInCurrentConsole {", 1
+        )[0]
+        self.assertLess(transport.index("Invoke-WithCredentialEnvironment"),
+                        transport.index("bash @bashArguments"))
 
     def test_failed_launch_stays_open_without_printing_credential(self):
         self.assertIn('Write-Host "Command structure: $quotedLaunch"', SCRIPT)
