@@ -1,0 +1,45 @@
+$bashFunctions = @'
+redacted-claude() {
+    local d="/tmp/claude-$(id -u)"
+    mkdir -p -- "$d" || return 22
+    [ ! -L "$d" ] && [ -d "$d" ] && [ -O "$d" ] || return 22
+    chmod 700 "$d" || return 22
+
+    nono run \
+        --profile redacted-claude \
+        --allow-cwd \
+        --allow-domain "$REDACTED_PROXY_HOST" \
+        -- claude "$@"
+}
+
+redacted-codex() {
+    nono run \
+        --profile redacted-codex \
+        --allow-cwd \
+        --allow-domain "$REDACTED_PROXY_HOST" \
+        -- codex "$@"
+}
+
+redacted-opencode() {
+    nono run \
+        --profile redacted-opencode \
+        --allow-cwd \
+        --allow-domain "$REDACTED_PROXY_HOST" \
+        -- opencode "$@"
+}
+'@
+
+$octalPayload = -join (
+    [Text.Encoding]::UTF8.GetBytes($bashFunctions) |
+        ForEach-Object {
+            '\' + [Convert]::ToString($_, 8).PadLeft(3, '0')
+        }
+)
+
+$argumentList = "-d Nono-1-0-0 -u nono -- /bin/sh -c `"printf '%b\n' '$octalPayload' >> /home/nono/.bashrc`""
+
+Start-ADTProcessAsUser `
+    -FilePath "$env:SystemRoot\System32\wsl.exe" `
+    -ArgumentList $argumentList `
+    -CreateNoWindow `
+    -SecureArgumentList
