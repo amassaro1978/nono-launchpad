@@ -1,224 +1,136 @@
 #!/usr/bin/env python3
-"""Focused regression tests for the shared Launch/Open Shell WSL transport."""
+"""Focused security and transport checks."""
 
 import base64
-import hashlib
 from pathlib import Path
 import re
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT_BYTES = (ROOT / "Nono-Launchpad.ps1").read_bytes()
-SCRIPT = SCRIPT_BYTES.decode("utf-8")
+SCRIPT = (ROOT / "Nono-Launchpad.ps1").read_text(encoding="utf-8")
+README = (ROOT / "README.md").read_text(encoding="utf-8")
 
 
-def byte_region(start: bytes, end: bytes) -> bytes:
-    begin = SCRIPT_BYTES.index(start)
-    finish = SCRIPT_BYTES.index(end, begin)
-    return SCRIPT_BYTES[begin:finish]
-
-
-def text_region(start: str, end: str) -> str:
+def region(start: str, end: str) -> str:
     begin = SCRIPT.index(start)
-    finish = SCRIPT.index(end, begin)
-    return SCRIPT[begin:finish]
-
-
-class ProtectedRegionTests(unittest.TestCase):
-    """Hashes guard non-launch regions; intentional user-context edits refresh snapshots."""
-
-    EXPECTED = {
-        "Invoke-WslText": (
-            b"function Invoke-WslText {",
-            b"function Test-DistroRegistered {",
-            "2c5892a416e5db27cce25138d3108239c3f5f5489508c4aa5bfb3b446cdaa4ea",
-        ),
-        "Refresh-Projects": (
-            b"function Refresh-Projects {",
-            b"function Refresh-Readiness {",
-            "370e68a5c66e92ec6223ace3dbbe931ab81693a645e7c31d566a3b2e3fa0d77f",
-        ),
-        "Start-HelperTerminal": (
-            b"function Start-HelperTerminal {",
-            b"$SetKeyButton.Add_Click({",
-            "79d0f7e88bbbefa9d597bd37fc149d2ec14ffc1e44b45e05ce3ef309b6ceddc4",
-        ),
-        "CreateButton behavior": (
-            b"$CreateButton.Add_Click({",
-            b"$RefreshButton.Add_Click({",
-            "84071a8a83fc0de0742de8d5d5c37828cd079ddfb20be8f1df83189b9fe036f8",
-        ),
-    }
-
-    def test_non_launch_regions_match_parent_byte_for_byte(self):
-        for name, (start, end, expected) in self.EXPECTED.items():
-            with self.subTest(region=name):
-                actual = hashlib.sha256(byte_region(start, end)).hexdigest()
-                self.assertEqual(expected, actual)
+    return SCRIPT[begin : SCRIPT.index(end, begin)]
 
 
 class LaunchTransportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.transport = text_region(
-            "function Invoke-GeneratedLinuxScript {",
-            "function Invoke-AgentInCurrentConsole {",
-        )
-        cls.launch = text_region(
-            "function Invoke-AgentInCurrentConsole {",
-            "function Open-ShellInCurrentConsole {",
-        )
-        cls.open_shell = text_region(
-            "function Open-ShellInCurrentConsole {",
-            "if ($Mode -eq 'Launch') {",
-        )
-        cls.path_helper = text_region(
-            "function New-CryptographicLaunchTempPath {",
-            "function Get-RemoteRefreshScriptLines {",
-        )
-        cls.script_builder = text_region(
-            "    $linuxScript = @(",
-            "    Write-Host \"Launching $AgentName",
-        )
+        cls.credential = region("function Invoke-WithCredentialEnvironment {", "function Initialize-FinalPathApi {")
+        cls.transport = region("function Invoke-GeneratedLinuxScript {", "function Invoke-OpenCodeFileOperation {")
+        cls.launch = region("function Invoke-AgentInCurrentConsole {", "function Open-ShellInCurrentConsole {")
+        cls.shell = region("function Open-ShellInCurrentConsole {", "if ($Mode -eq 'Launch') {")
 
-    def test_temp_path_is_cryptographically_random_and_shell_safe(self):
-        self.assertIn("[Security.Cryptography.RandomNumberGenerator]::Create()", self.path_helper)
-        self.assertIn("New-Object byte[] 24", self.path_helper)
-        self.assertIn("$_.ToString('x2')", self.path_helper)
-        self.assertIn('return "/tmp/nono-launch-$token.sh"', self.path_helper)
-        self.assertRegex(self.path_helper, r"/tmp/nono-launch-\$token\.sh")
-        self.assertNotIn("Get-Random", self.path_helper)
+    def test_dpapi_and_wslenv_lifecycle_remain_intact(self):
+        self.assertIn("ConvertFrom-SecureString $SecureValue", SCRIPT)
+        self.assertIn("ConvertTo-SecureString -String $encrypted", SCRIPT)
+        for marker in (
+            "SecureStringToBSTR",
+            "PtrToStringBSTR",
+            "SetEnvironmentVariable($variableName, $plain, 'Process')",
+            '$parts += "$variableName/u"',
+            "SetEnvironmentVariable($variableName, $previousValue, 'Process')",
+            "SetEnvironmentVariable('WSLENV', $previousWslEnv, 'Process')",
+            "ZeroFreeBSTR",
+            "$secure.Dispose()",
+        ):
+            self.assertIn(marker, self.credential)
+        self.assertNotIn("Write-Host $plain", SCRIPT)
 
-    def test_creation_uses_utf8_base64_noclobber_and_mode_700(self):
-        self.assertIn("[Text.Encoding]::UTF8.GetBytes($LinuxScript)", self.transport)
-        self.assertIn("umask 077; set -C;", self.transport)
-        self.assertIn("base64 -d", self.transport)
-        self.assertIn("chmod 700 $temporaryLinuxPath", self.transport)
+    def test_credential_cannot_be_expanded_into_argv(self):
+        conversion = region("function ConvertTo-BashArgument {", "function ConvertTo-PowerShellLiteral {")
+        self.assertIn("OrdinalIgnoreCase", conversion)
+        self.assertIn("$Config.CredentialVariable", conversion)
+        self.assertIn("cannot be expanded into argv", conversion)
+        self.assertIn("cannot expand the configured credential", SCRIPT)
+
+    def test_temp_path_is_random_and_shell_safe(self):
+        helper = region("function New-CryptographicLaunchTempPath {", "function Invoke-GeneratedLinuxScript {")
+        self.assertIn("RandomNumberGenerator", helper)
+        self.assertIn("New-Object byte[] 24", helper)
+        self.assertIn("ToString('x2')", helper)
+        self.assertIn("/tmp/nono-launch-", helper)
+        self.assertNotIn("Get-Random", helper)
+
+    def test_creation_uses_base64_noclobber_mode_700_and_checks_exit(self):
+        for marker in (
+            "[Text.Encoding]::UTF8.GetBytes($LinuxScript)",
+            "umask 077; set -C;",
+            "base64 -d",
+            "chmod 700 $temporaryLinuxPath",
+            "if ($LASTEXITCODE -ne 0)",
+        ):
+            self.assertIn(marker, self.transport)
         bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.transport).group(1)
         self.assertNotIn('"', bootstrap)
-        self.assertIn(
-            "bash -c $createBootstrap",
-            self.transport,
-        )
-        self.assertNotIn("bash -c $createBootstrap bash $encodedScript $temporaryLinuxPath", self.transport)
-        self.assertNotIn("printf %s $1", self.transport)
-        self.assertNotIn("chmod 700 $2", self.transport)
+        self.assertNotIn("$LinuxScript", bootstrap)
 
-    def test_creation_exit_is_checked_before_credentialed_launch(self):
-        capture = self.transport.index("$creationExitCode = $LASTEXITCODE")
-        check = self.transport.index("if ($creationExitCode -ne 0)")
-        launch = self.transport.index("Invoke-WithCredentialEnvironment")
-        self.assertLess(capture, check)
-        self.assertLess(check, launch)
-
-    def test_launch_bash_argv_is_simple_and_excludes_generated_command(self):
-        argv = self.transport[
-            self.transport.index(
-            "        $bashArguments = @('-l')",
-            ) : self.transport.index("        Invoke-WithCredentialEnvironment")
-        ]
-        self.assertIn("$UseAgentShell -and $Config.UseInteractiveAgentShell", argv)
+    def test_generated_script_is_not_passed_through_bash_c(self):
+        argv = self.transport[self.transport.index("$bashArguments = @('-l')") : self.transport.index("Invoke-WithCredentialEnvironment")]
         self.assertIn("$bashArguments += $temporaryLinuxPath", argv)
-        self.assertNotIn("$linuxScript", argv)
-        self.assertNotIn("$quotedLaunch", argv)
+        self.assertNotIn("$LinuxScript", argv)
         self.assertNotIn("'-c'", argv)
         self.assertIn("bash @bashArguments", self.transport)
 
-    def test_launch_and_open_shell_both_use_shared_transport(self):
-        self.assertIn(
-            "Invoke-GeneratedLinuxScript -LinuxScript $linuxScript -OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode",
-            self.launch,
-        )
-        self.assertIn(
-            "Invoke-GeneratedLinuxScript -LinuxScript $linux -OperationName 'The WSL shell' -UseAgentShell",
-            self.open_shell,
-        )
-        self.assertNotIn("Get-BashCommandArguments", self.open_shell)
-        self.assertNotIn("bash -c", self.open_shell)
-        self.assertNotIn("CheckExecutionExitCode", self.open_shell)
+    def test_launch_and_shell_use_explicit_linux_user_and_shared_transport(self):
+        self.assertGreaterEqual(SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"), 4)
+        self.assertIn("Invoke-GeneratedLinuxScript", self.launch)
+        self.assertIn("Invoke-GeneratedLinuxScript", self.shell)
+        self.assertIn("-UseAgentShell -CheckExecutionExitCode", self.launch)
+        self.assertIn("-UseAgentShell", self.shell)
+        self.assertIn("Invoke-OpenCodeSyncProbe", self.launch)
+        self.assertIn("Invoke-OpenCodeSyncProbe", self.shell)
 
-    def test_refresh_variables_never_cross_the_windows_wsl_command_line(self):
-        refresh = text_region(
-            "function Get-RemoteRefreshScriptLines {",
-            "function Invoke-GeneratedLinuxScript {",
-        )
-        for marker in ("$1", "${destination%/*}", '"$directory"'):
-            self.assertIn(marker, refresh)
-
-        bootstrap = re.search(r'\$createBootstrap = "([^"]+)"', self.transport).group(1)
-        for marker in ("$1", "${destination%/*}", "$directory", "refresh_file"):
-            self.assertNotIn(marker, bootstrap)
-        self.assertIn("$encodedScript", bootstrap)
-        self.assertIn("$temporaryLinuxPath", bootstrap)
-
-        self.assertRegex(
-            (ROOT / "README.md").read_text(encoding="utf-8"),
-            r"each of the six configured\s+refreshes reached `mkdir -p --` without an operand",
-        )
-
-    def test_claude_temp_directory_exists_before_nono_builds_its_sandbox(self):
-        self.assertIn("if ([string]$agentConfig.Command -eq 'claude')", self.launch)
-        for marker in (
-            'claude_temp="/tmp/claude-$(id -u)"',
-            'mkdir -p -- "$claude_temp"',
-            '[ -L "$claude_temp" ]',
-            '[ -O "$claude_temp" ]',
-            'chmod 700 "$claude_temp"',
-            '[ -r "$claude_temp" ]',
-            '[ -w "$claude_temp" ]',
-            '[ -x "$claude_temp" ]',
-            'exit 22',
-        ):
-            self.assertIn(marker, self.launch)
-        self.assertNotIn("chown", self.launch)
-        self.assertNotIn("sudo", self.launch)
-        self.assertLess(self.script_builder.index("$agentPreparationLines"),
-                        self.script_builder.index('"exec $quotedLaunch"'))
-
-    def test_script_self_deletes_before_exec_and_finally_cleans_up(self):
-        self.assertLess(self.script_builder.index('rm -f -- \"$0\"'),
-                        self.script_builder.index('"exec $quotedLaunch"'))
-        self.assertLess(self.script_builder.index("$remoteRefreshLines"),
-                        self.script_builder.index("$agentPreparationLines"))
-        self.assertLess(self.script_builder.index("$agentPreparationLines"),
-                        self.script_builder.index('"exec $quotedLaunch"'))
-        self.assertLess(self.open_shell.index('rm -f -- "$0"'),
-                        self.open_shell.index("@('exec bash -l')"))
+    def test_script_self_deletes_and_finally_cleans_up(self):
+        self.assertIn('rm -f -- "$0"', self.launch)
+        self.assertIn('rm -f -- "$0"', self.shell)
+        self.assertIn("finally {", self.transport)
         self.assertIn("rm -f -- $temporaryLinuxPath", self.transport)
-        self.assertRegex(
-            self.transport,
-            r"finally \{\n(?:.|\n)*?try \{ \$null = & wsl\.exe .*? rm -f -- \$temporaryLinuxPath",
-        )
+        self.assertIn("catch { }", self.transport)
 
-    def test_cleanup_covers_creation_and_launch_failures(self):
-        outer_try = self.transport.index("    try {\n        # The bootstrap")
-        creation = self.transport.index("bash -c $createBootstrap", outer_try)
-        launch = self.transport.index("bash @bashArguments", creation)
-        cleanup = self.transport.index("    finally {", launch)
-        self.assertLess(outer_try, creation)
-        self.assertLess(creation, launch)
-        self.assertLess(launch, cleanup)
-        self.assertIn("catch { }", self.transport[cleanup:])
+    def test_command_shape_and_working_directory_access(self):
+        command = region("function Get-OpenCodeCommand {", "function Invoke-AgentInCurrentConsole {")
+        for value in ("'nono'", "'run'", "'--profile'", "'--'"):
+            self.assertIn(value, command)
+        self.assertIn("Profile = 'opencode'", SCRIPT)
+        self.assertIn("Command = 'opencode'", SCRIPT)
+        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 1)
+        self.assertIn("cd -- ' + (ConvertTo-BashLiteral $wslPath)", self.launch)
+        self.assertNotIn("~/projects", SCRIPT)
+        self.assertNotIn("mkdir -p -- `\"`$HOME", SCRIPT)
 
-    def test_credential_is_neither_embedded_nor_printed_by_transport(self):
-        for forbidden in ("CredentialVariable", "$plain", "PROXY_API_KEY", "Write-Host $encodedScript"):
-            self.assertNotIn(forbidden, self.script_builder)
-        self.assertIn("Invoke-WithCredentialEnvironment", self.transport)
-        self.assertNotIn("Write-Host $linuxScript", self.launch)
-        self.assertNotIn("Write-Host $temporaryLinuxPath", self.transport)
-        self.assertNotIn("CredentialVariable", self.open_shell)
+    def test_sync_urls_and_generated_scripts_never_embed_credentials(self):
+        sync = region("function Invoke-OpenCodeFileOperation {", "function Invoke-OpenCodeSyncProbe {")
+        self.assertIn("--proto '=https' --proto-redir '=https'", sync)
+        self.assertIn("Invoke-WslScriptText", sync)
+        self.assertNotIn("$plain", sync)
+        self.assertNotIn("PROXY_API_KEY", sync)
+        self.assertNotIn("CredentialVariable", self.launch)
+        self.assertNotIn("CredentialVariable", self.shell)
 
-    def test_ascii_quotes_and_semicolons_survive_base64_round_trip(self):
-        sample = (
-            "#!/usr/bin/env bash\n"
-            "rm -f -- \"$0\" || { printf '%s\\n' 'cleanup failed'; exit 21; }\n"
-            "exec 'nono' 'run' '--profile' 'vendor/profile' -- 'agent' "
-            "'single'\"'\"'quote' 'semi;colon' 'spaces stay'\n"
-        )
-        encoded = base64.b64encode(sample.encode("utf-8")).decode("ascii")
+    def test_base64_round_trip_preserves_special_characters(self):
+        sample = "#!/usr/bin/env bash\ncd -- '/mnt/c/a b'\nexec 'nono' 'run' '--profile' 'opencode' '--allow-cwd' '--' 'opencode'\n"
+        encoded = base64.b64encode(sample.encode()).decode()
         self.assertRegex(encoded, r"^[A-Za-z0-9+/]+={0,2}$")
-        self.assertEqual(sample, base64.b64decode(encoded).decode("utf-8"))
-        self.assertIn("[Convert]::ToBase64String", self.transport)
+        self.assertEqual(base64.b64decode(encoded).decode(), sample)
+
+    def test_helper_terminal_avoids_start_process_argument_flattening_bugs(self):
+        helper = region("function Start-HelperTerminal {", "function Complete-PendingLaunch {")
+        self.assertIn("$Host.UI.RawUI.WindowTitle", helper)
+        self.assertIn("[Text.Encoding]::Unicode.GetBytes($command)", helper)
+        self.assertIn("'-EncodedCommand'", helper)
+        self.assertNotIn("wt.exe", helper)
+        self.assertNotIn("'--title'", helper)
+
+    def test_no_execution_policy_bypass_or_credential_logging(self):
+        self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
+        self.assertNotIn("Write-Host $linuxScript", SCRIPT)
+        self.assertNotIn("Write-Host $encodedScript", SCRIPT)
+        self.assertIn("credential value was not printed", SCRIPT)
+        self.assertIn("process environment", README)
 
 
 if __name__ == "__main__":

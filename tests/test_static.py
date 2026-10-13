@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Static regression tests for the self-contained PowerShell/WPF launchpad."""
+"""Static release checks for the OpenCode-only PowerShell/WPF launchpad."""
 
 from pathlib import Path
+import ntpath
 import re
 import unittest
 import xml.etree.ElementTree as ET
@@ -10,6 +11,11 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = (ROOT / "Nono-Launchpad.ps1").read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 XAML_MATCH = re.search(r"\[xml\]\$xaml = @'\n(.*?)\n'@", SCRIPT, re.S)
+
+
+def region(start: str, end: str) -> str:
+    begin = SCRIPT.index(start)
+    return SCRIPT[begin : SCRIPT.index(end, begin)]
 
 
 class LaunchpadStaticTests(unittest.TestCase):
@@ -21,247 +27,224 @@ class LaunchpadStaticTests(unittest.TestCase):
         cls.xaml = ET.fromstring(cls.xaml_text)
         cls.wpf = "{http://schemas.microsoft.com/winfx/2006/xaml/presentation}"
         cls.xname = "{http://schemas.microsoft.com/winfx/2006/xaml}Name"
+        cls.names = {item.attrib.get(cls.xname) for item in cls.xaml.iter()}
 
-    def test_xaml_has_scrollable_content_and_docked_launch_area(self):
-        dock = self.xaml.find(f"{self.wpf}DockPanel")
-        self.assertIsNotNone(dock)
-        children = list(dock)
-        self.assertEqual(children[0].tag, f"{self.wpf}Border")
-        self.assertEqual(children[0].attrib[self.xname], "LaunchStatusArea")
-        self.assertEqual(children[0].attrib["DockPanel.Dock"], "Bottom")
-        self.assertEqual(children[1].tag, f"{self.wpf}ScrollViewer")
-        self.assertEqual(children[1].attrib[self.xname], "MainScrollViewer")
-        self.assertEqual(children[1].attrib["VerticalScrollBarVisibility"], "Auto")
+    def test_opencode_is_the_only_agent_and_artifact(self):
+        config = region("# =========================== EDIT SETTINGS HERE", "# ========================= END EDIT SETTINGS HERE")
+        agents = config.split("Agents            = [ordered]@{", 1)[1]
+        self.assertEqual(re.findall(r"^        '([^']+)' = @\{$", agents, re.M), ["OpenCode"])
+        self.assertIn("DefaultAgent      = 'OpenCode'", config)
+        self.assertEqual(config.count("NonoArguments = @('--allow-cwd')"), 1)
+        combined = (SCRIPT + "\n" + README).lower()
+        self.assertNotIn("clau" + "de", combined)
+        self.assertNotIn("co" + "dex", combined)
+        self.assertNotIn("agentcombo", combined)
+        self.assertNotIn("projectroot", combined)
+        self.assertNotIn("create a project", combined)
 
-    def test_launch_status_controls_are_named_and_footer_is_removed(self):
-        names = {element.attrib.get(self.xname) for element in self.xaml.iter()}
-        self.assertTrue(
-            {"LaunchStatusArea", "LaunchStatusBanner", "LaunchStatusText", "LaunchButton"}
-            <= names
-        )
-        self.assertNotIn("FooterText", names)
-        self.assertIn("TextWrapping", next(
-            element.attrib
-            for element in self.xaml.iter()
-            if element.attrib.get(self.xname) == "LaunchStatusText"
-        ))
-
-    def test_window_is_bounded_to_windows_work_area(self):
-        self.assertNotIn("MinHeight", self.xaml.attrib)
-        self.assertNotIn("MinWidth", self.xaml.attrib)
-        for marker in (
-            "$workArea = [System.Windows.SystemParameters]::WorkArea",
-            "$window.MaxHeight = $workArea.Height",
-            "$window.MaxWidth = $workArea.Width",
-            "$window.MinHeight = [Math]::Min(420.0, $workArea.Height)",
-            "$window.MinWidth = [Math]::Min(640.0, $workArea.Width)",
-            "$window.Height = [Math]::Min(680.0, $workArea.Height)",
-            "$window.Width = [Math]::Min(880.0, $workArea.Width)",
-        ):
-            self.assertIn(marker, SCRIPT)
-
-    def test_pack_inventory_is_absent(self):
-        combined = SCRIPT + "\n" + README
-        for marker in (
-            "nono list --installed",
-            "Installed nono packs",
-            "Pack inventory",
-            "pack_output",
-        ):
-            self.assertNotIn(marker, combined)
-
-    def test_launch_reasons_are_visible_nonblank_and_reactive(self):
-        self.assertIn('$LaunchStatusText.Text = "Launch unavailable: $reasonText"', SCRIPT)
-        self.assertIn("$LaunchButton.ToolTip = $reasonText", SCRIPT)
-        self.assertIn("Where-Object { -not [string]::IsNullOrWhiteSpace", SCRIPT)
-        self.assertIn("readiness checks have not completed", SCRIPT)
-        self.assertIn("$ProjectCombo.Add_SelectionChanged({ Update-ControlState })", SCRIPT)
-        self.assertIn("$AgentCombo.Add_SelectionChanged({ Update-ControlState })", SCRIPT)
-        for reason in (
-            "save $($Config.CredentialVariable)",
-            "WSL distro '$($Config.Distro)' is unavailable",
-            "select a configured agent",
-            "select a project",
-        ):
-            self.assertIn(reason, SCRIPT)
-
-    def test_agent_and_profile_validation_is_deferred_to_real_launch(self):
-        self.assertIn('export PATH="$HOME/.local/bin:$PATH"', SCRIPT)
-        self.assertNotIn("command -v $commandLiteral", SCRIPT)
-        self.assertNotIn("nono profile show $profileLiteral --json", SCRIPT)
-        self.assertIn("Agent executable and profile: validated by Launch", SCRIPT)
-        self.assertIn("Launch errors remain visible in the agent terminal", SCRIPT)
-        self.assertIn("$LaunchButton.IsEnabled = $blockers.Count -eq 0", SCRIPT)
-
-    def test_opencode_is_the_explicit_default_agent(self):
-        self.assertIn("DefaultAgent      = 'OpenCode'", SCRIPT)
-        self.assertIn("DefaultAgent must match a configured agent display name", SCRIPT)
-        self.assertIn("$AgentCombo.SelectedItem = [string]$Config.DefaultAgent", SCRIPT)
-        self.assertNotIn("$AgentCombo.SelectedIndex = 0", SCRIPT)
-        self.assertIn("DefaultAgent = 'OpenCode'", README)
-
-    def test_false_command_and_profile_probe_warnings_are_removed(self):
-        self.assertIn("$blockers = New-Object System.Collections.Generic.List[string]", SCRIPT)
-        self.assertNotIn("$warnings = New-Object System.Collections.Generic.List[string]", SCRIPT)
-        self.assertNotIn("nono executable was not verified", SCRIPT)
-        self.assertNotIn("was not verified", SCRIPT)
-        blocker_adds = "\n".join(
-            line for line in SCRIPT.splitlines() if "$blockers.Add(" in line
-        )
-        self.assertNotIn("nono executable", blocker_adds)
-        self.assertNotIn("agent executable", blocker_adds)
-        self.assertNotIn("profile '", blocker_adds)
-        self.assertIn("authoritative runtime test", README)
-
-    def test_launch_and_open_shell_share_interactive_login_mode(self):
-        self.assertIn("UseInteractiveAgentShell = $true", SCRIPT)
-        self.assertIn("function Get-BashCommandArguments", SCRIPT)
-        self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell)", SCRIPT)
-        self.assertIn("$arguments += '-i'", SCRIPT)
-        self.assertIn("if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $bashArguments += '-i' }", SCRIPT)
-        self.assertIn("$bashArguments += $temporaryLinuxPath", SCRIPT)
-        self.assertEqual(SCRIPT.count("Invoke-GeneratedLinuxScript -LinuxScript"), 2)
-        self.assertIn("-OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode", SCRIPT)
-        self.assertIn("-OperationName 'The WSL shell' -UseAgentShell", SCRIPT)
-        self.assertNotIn("-- bash -lc $linux", SCRIPT)
-
-    def test_open_shell_uses_credential_environment_wrapper(self):
-        transport = SCRIPT.split("function Invoke-GeneratedLinuxScript {", 1)[1].split(
-            "function Invoke-AgentInCurrentConsole {", 1
-        )[0]
-        open_shell = SCRIPT.split("function Open-ShellInCurrentConsole {", 1)[1].split(
-            "if ($Mode -eq 'Launch') {", 1
-        )[0]
-        wrapper = transport.index("Invoke-WithCredentialEnvironment {")
-        wsl = transport.index("& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments")
-        self.assertLess(wrapper, wsl)
-        self.assertIn("Invoke-GeneratedLinuxScript", open_shell)
-        self.assertNotIn("CredentialVariable", open_shell)
-        self.assertNotIn("Write-Host", open_shell)
-        self.assertRegex(
-            README,
-            r"same DPAPI\s+decryption\s+and process-scoped `WSLENV` injection wrapper",
-        )
-
-    def test_open_shell_runs_the_same_refresh_before_shell_handoff(self):
-        open_shell = SCRIPT.split("function Open-ShellInCurrentConsole {", 1)[1].split(
-            "if ($Mode -eq 'Launch') {", 1
-        )[0]
-        self.assertIn("@(Get-RemoteRefreshScriptLines)", open_shell)
-        assembly = open_shell.index("@(Get-RemoteRefreshScriptLines)")
-        handoff = open_shell.index("@('exec bash -l')")
-        execution = open_shell.index("Invoke-GeneratedLinuxScript")
-        self.assertLess(assembly, handoff)
-        self.assertLess(handoff, execution)
-        self.assertIn('rm -f -- "$0"', open_shell)
-        self.assertNotIn("Get-BashCommandArguments", open_shell)
-
-    def test_readiness_avoids_shell_probe_and_path_diagnostics(self):
-        self.assertNotIn("__NONO_LAUNCHPAD_READINESS__", SCRIPT)
-        self.assertNotIn("Only exact private markers are parsed", SCRIPT)
-        self.assertNotIn("$lines.Add($line)", SCRIPT)
-        combined = SCRIPT + "\n" + README
-        for forbidden in ("type -a ", "command -V ", "which nono", 'Text = "PATH',
-                          '$lines.Add("PATH', "Write-Host $env:PATH"):
-            self.assertNotIn(forbidden, combined)
-        self.assertRegex(README, r"does not\s+display or log `PATH`")
-
-    def test_security_and_folder_invariants_remain(self):
-        self.assertEqual(SCRIPT.count("NonoArguments = @('--allow-cwd')"), 3)
-        self.assertGreaterEqual(SCRIPT.count("AgentArguments = @()"), 3)
-        self.assertIn("LinuxUser         = 'nono'", SCRIPT)
-        self.assertEqual(
-            SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"),
-            4,
-        )
-        self.assertNotIn("-ExecutionPolicy Bypass", SCRIPT)
-        self.assertIn("[Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')", SCRIPT)
-        self.assertIn("$parts += \"$variableName/u\"", SCRIPT)
-        self.assertIn('$linuxPaths = @(Invoke-WslText', SCRIPT)
-        self.assertIn('"\\\\wsl.localhost\\$($Config.Distro)"', SCRIPT)
-
-    def test_exactly_six_remote_files_are_configured_with_safe_disabled_defaults(self):
-        config_block = SCRIPT.split(
-            "# =========================== EDIT SETTINGS HERE", 1
-        )[1].split("# ========================= END EDIT SETTINGS HERE", 1)[0]
-        remote_block = config_block.split("RemoteFiles       = [ordered]@{", 1)[1].split(
-            "    Agents            = [ordered]@{", 1
-        )[0]
+    def test_only_two_jsonc_remote_files_exist(self):
+        config = region("RemoteFiles       = [ordered]@{", "    Agents            = [ordered]@{")
         entries = re.findall(
-            r"^        '([^']+)' = @\{\n"
-            r"            Url = '([^']*)'\n"
-            r"            Destination = '([^']+)'\n"
-            r"        \}$",
-            remote_block,
+            r"^        '([^']+)' = @\{\n            Url = '([^']*)'\n            Destination = '([^']+)'\n        \}$",
+            config,
             re.M,
         )
-        self.assertEqual(len(entries), 6)
-        self.assertEqual(sum("nono profile" in name for name, _, _ in entries), 3)
         self.assertEqual(
-            {name for name, _, _ in entries if name.endswith(" config")},
-            {"Claude config", "Codex config", "OpenCode config"},
+            entries,
+            [
+                ("OpenCode nono profile", "", "~/.config/nono/profiles/opencode.jsonc"),
+                ("OpenCode config", "", "~/.config/opencode/opencode.jsonc"),
+            ],
         )
-        self.assertTrue(all(url == "" for _, url, _ in entries))
-        destinations = [destination for _, _, destination in entries]
-        self.assertTrue(all(destination.startswith("~/") for destination in destinations))
-        self.assertEqual(len(set(destinations)), 6)
-        self.assertEqual(
-            set(destinations),
-            {
-                "~/.config/nono/profiles/claude.jsonc",
-                "~/.config/nono/profiles/codex.jsonc",
-                "~/.config/nono/profiles/opencode.jsonc",
-                "~/.claude/settings.json",
-                "~/.codex/config.toml",
-                "~/.config/opencode/opencode.jsonc",
-            },
-        )
-        self.assertIn("if ($Config.RemoteFiles.Count -ne 6)", SCRIPT)
-        self.assertIn("must use an HTTPS URL without embedded credentials", SCRIPT)
-        self.assertIn("has a whitespace-only Url", SCRIPT)
-        self.assertIn("CurlConnectTimeoutSeconds = 10", SCRIPT)
-        self.assertIn("CurlMaxTimeSeconds = 60", SCRIPT)
+        self.assertIn("$Config.RemoteFiles.Count -ne 2", SCRIPT)
+        self.assertIn("must use HTTPS without embedded credentials", SCRIPT)
 
-    def test_remote_refresh_preserves_existing_files_on_failure(self):
-        refresh = SCRIPT.split("function Get-RemoteRefreshScriptLines {", 1)[1].split(
-            "function Invoke-AgentInCurrentConsole {", 1
-        )[0]
+    def test_one_display_name_variable_drives_visible_branding(self):
+        self.assertEqual(SCRIPT.count("$DisplayName = 'Nono Launchpad'"), 1)
+        self.assertNotIn('Title="Nono Launchpad"', self.xaml_text)
+        self.assertNotIn('Text="Nono Launchpad"', self.xaml_text)
         for marker in (
-            "curl --fail --silent --show-error --location --connect-timeout $connectTimeout --max-time $maxTime",
-            "--proto '=https' --proto-redir '=https'",
-            "mktemp --tmpdir=\"$directory\"",
-            "mv -fT -- \"$temporary\" \"$destination\"",
-            "rm -f -- \"$temporary\"",
-            "keeping existing file if present",
-            "$Config.RemoteFiles.GetEnumerator()",
+            "$window.Title = $DisplayName",
+            "$BrandHeading.Text = $DisplayName",
+            "$DisplayName launch failed",
+            "$DisplayName shell failed",
+            '"About $DisplayName"',
+            '"$DisplayName - $HelperMode"',
+            "$dialog.Description = \"$DisplayName",
         ):
-            self.assertIn(marker, refresh)
-        self.assertNotIn("sudo", refresh)
-        self.assertIn("[ -n \"$url\" ] || return 0", refresh)
-        launch = SCRIPT.split("function Invoke-AgentInCurrentConsole {", 1)[1].split(
-            "function Open-ShellInCurrentConsole {", 1
-        )[0]
-        script_builder = launch.split("    $linuxScript = @(", 1)[1].split(
-            "    $encodedScript = ", 1
-        )[0]
-        self.assertLess(script_builder.index("cd `\"`$HOME/$root/$ProjectName`\""),
-                        script_builder.index("$remoteRefreshLines"))
-        self.assertLess(script_builder.index("$remoteRefreshLines"),
-                        script_builder.index('"exec $quotedLaunch"'))
-        self.assertIn("Invoke-GeneratedLinuxScript -LinuxScript $linuxScript", launch)
-        transport = SCRIPT.split("function Invoke-GeneratedLinuxScript {", 1)[1].split(
-            "function Invoke-AgentInCurrentConsole {", 1
-        )[0]
-        self.assertLess(transport.index("Invoke-WithCredentialEnvironment"),
-                        transport.index("bash @bashArguments"))
+            self.assertIn(marker, SCRIPT)
+        self.assertIn("Version $DisplayVersion", SCRIPT)
+        self.assertIn("technical identifiers", README.lower())
 
-    def test_failed_launch_stays_open_without_printing_credential(self):
-        self.assertIn('Write-Host "Command structure: $quotedLaunch"', SCRIPT)
-        self.assertIn('Write-Host "Launch failed: $($_.Exception.Message)"', SCRIPT)
-        self.assertIn("[void](Read-Host)", SCRIPT)
-        self.assertIn("The credential value was not printed", SCRIPT)
-        self.assertNotIn('Write-Host $plain', SCRIPT)
-        self.assertIn("terminal remains open", README)
+    def test_browse_and_persistent_ten_entry_history(self):
+        self.assertTrue({"ProjectCombo", "ProjectValidationText", "BrowseButton", "RefreshButton"} <= self.names)
+        combo = next(x for x in self.xaml.iter() if x.attrib.get(self.xname) == "ProjectCombo")
+        self.assertEqual(combo.attrib.get("IsEditable"), "True")
+        self.assertIn("System.Windows.Forms.FolderBrowserDialog", SCRIPT)
+        self.assertIn("ProjectHistoryFile = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\\projects.json'", SCRIPT)
+        self.assertEqual(SCRIPT.count("$ProjectHistoryLimit = 10"), 1)
+        self.assertIn("System.Collections.Generic.HashSet[string]", SCRIPT)
+        self.assertIn("[StringComparer]::OrdinalIgnoreCase", SCRIPT)
+        self.assertIn("Save-ProjectHistory -Paths $valid.ToArray()", SCRIPT)
+        history = region("function Save-ProjectHistory {", "function Invoke-WslScriptText {")
+        self.assertIn("Select-Object -First $ProjectHistoryLimit", history)
+        self.assertIn("if ($valid.Count -eq $ProjectHistoryLimit) { break }", history)
+        self.assertIn("$needsRewrite = $true", history)
+        self.assertIn("Move-Item -LiteralPath $temporary -Destination $Config.ProjectHistoryFile -Force", history)
+        self.assertIn("uniquely named sibling temporary file", README)
+        self.assertIn("at most 10 valid entries", README)
+        self.assertIn("Test-Path -LiteralPath $lexical -PathType Container", SCRIPT)
+        self.assertIn("$ProjectValidationText.Text = $projectMessage", SCRIPT)
+
+    def test_windows_and_unc_paths_are_canonicalized_then_proved_in_wsl(self):
+        resolver = region("function Resolve-WindowsProjectPath {", "function ConvertTo-WslProjectPath {")
+        self.assertIn("[Environment]::ExpandEnvironmentVariables", resolver)
+        self.assertIn("[IO.Path]::GetFullPath", resolver)
+        self.assertIn("GetFinalDirectoryPath", resolver)
+        self.assertRegex(resolver, r"A-Za-z\]:\[\\\\/\].*\\\\\\\\")
+        converter = region("function ConvertTo-WslProjectPath {", "function Save-ProjectHistory {")
+        self.assertIn("wslpath -a -u --", converter)
+        self.assertIn('[ -d "`$linux_path" ]', converter)
+        self.assertIn("[Convert]::ToBase64String", converter)
+        launch = region("function Invoke-AgentInCurrentConsole {", "function Open-ShellInCurrentConsole {")
+        self.assertLess(launch.index("Resolve-WindowsProjectPath"), launch.index("ConvertTo-WslProjectPath"))
+        self.assertIn("cd -- ' + (ConvertTo-BashLiteral $wslPath)", launch)
+
+    def test_sensitive_path_policy_and_bypass_defenses(self):
+        roots = region("function Get-SensitiveWindowsRoots {", "function Resolve-WindowsProjectPath {")
+        for value in (
+            "'C:\\'",
+            "'C:\\Windows'",
+            "'C:\\Program Files'",
+            "'C:\\Program Files (x86)'",
+            "'C:\\ProgramData'",
+            "'SystemRoot'",
+            "'windir'",
+            "'ProgramFiles'",
+            "'ProgramFiles(x86)'",
+            "'ProgramW6432'",
+            "'ProgramData'",
+        ):
+            self.assertIn(value, roots)
+        resolver = region("function Resolve-WindowsProjectPath {", "function ConvertTo-WslProjectPath {")
+        self.assertIn("$lexical", resolver)
+        self.assertIn("$final", resolver)
+        self.assertIn("foreach ($candidate in @($lexical, $final))", resolver)
+        self.assertIn("OrdinalIgnoreCase", resolver)
+        self.assertIn("TrimEnd('\\')", resolver)
+        self.assertIn("GetFinalPathNameByHandle", SCRIPT)
+        self.assertIn("Extended-device and device namespace paths are not accepted", resolver)
+        self.assertIn("junction", README.lower())
+        self.assertIn("reparse", README.lower())
+        self.assertIn("cannot be used as projects", SCRIPT)
+
+    def test_sync_has_install_compare_notice_decline_update_and_offline_paths(self):
+        sync = region("function Invoke-OpenCodeFileOperation {", "function Invoke-OpenCodeSyncProbe {")
+        for marker in (
+            "if [ ! -e \"`$destination\" ]",
+            "cmp -s --",
+            "sha256sum --",
+            "declined_file",
+            "INSTALLED",
+            "SAME",
+            "CHANGED",
+            "DECLINED",
+            "OFFLINE",
+            "UPDATED",
+            "mktemp --tmpdir",
+            "download validation failed",
+            "cp -a --",
+            'backup="`$destination.backup.`$stamp"',
+            "mv -fT --",
+            "atomic install failed",
+            "atomic replace failed",
+            "upstream changed during update",
+        ):
+            self.assertIn(marker, sync)
+        self.assertTrue({"SyncNotice", "SyncNoticeText", "UpdateFilesButton", "KeepFilesButton"} <= self.names)
+        self.assertIn("Repository versions changed for:", SCRIPT)
+        self.assertIn("timestamped backup", SCRIPT)
+        self.assertIn("same repository version does not prompt again", README)
+        self.assertIn("Repository unavailable; existing local files are preserved. Launching offline.", SCRIPT)
+        self.assertRegex(sync, re.compile(r'if ! mv -fT -- .*?atomic install failed', re.S))
+        self.assertRegex(sync, re.compile(r'if ! mv -fT -- .*?atomic replace failed', re.S))
+        self.assertIn("existing local files were preserved. Launching anyway", SCRIPT)
+
+    def test_first_run_install_precedes_launch_and_direct_mode_preserves_changes(self):
+        launch = region("function Invoke-AgentInCurrentConsole {", "function Open-ShellInCurrentConsole {")
+        self.assertLess(launch.index("Invoke-OpenCodeSyncProbe"), launch.index("Invoke-GeneratedLinuxScript"))
+        self.assertIn("keeping the existing local file", launch)
+        probe = region("function Invoke-OpenCodeFileOperation {", "function Invoke-OpenCodeSyncProbe {")
+        self.assertLess(probe.index('if [ ! -e "`$destination" ]'), probe.index("cmp -s --"))
+
+    def test_layout_and_about_controls_exist(self):
+        dock = self.xaml.find(f"{self.wpf}DockPanel")
+        self.assertIsNotNone(dock)
+        self.assertEqual(list(dock)[0].attrib[self.xname], "LaunchStatusArea")
+        self.assertEqual(list(dock)[0].attrib["DockPanel.Dock"], "Bottom")
+        self.assertEqual(list(dock)[1].tag, f"{self.wpf}ScrollViewer")
+        self.assertTrue({"LaunchButton", "LaunchStatusText", "AboutButton", "OpenShellButton"} <= self.names)
+        self.assertEqual(next(x for x in self.xaml.iter() if x.attrib.get(self.xname) == "LaunchButton").attrib["Content"], "Launch OpenCode")
+
+    def test_public_source_has_no_obvious_secret_or_private_path(self):
+        combined = SCRIPT + "\n" + README
+        patterns = (
+            r"(?i)(?:api[_-]?key|token|password)\s*[:=]\s*['\"][A-Za-z0-9_\-/+=]{20,}",
+            "/" + "Users" + r"/[^/\s]+",
+            "C:\\\\" + "Users" + r"\\[^\\\s]+",
+            r"ghp_[A-Za-z0-9]{20,}",
+        )
+        for pattern in patterns:
+            self.assertIsNone(re.search(pattern, combined), pattern)
+
+
+class PolicyContractExamples(unittest.TestCase):
+    """Executable examples for the case-insensitive separator-boundary policy."""
+
+    @staticmethod
+    def blocked(path: str) -> bool:
+        value = ntpath.normpath(path).rstrip("\\").casefold()
+        if value == "c:":
+            return True
+        roots = [r"c:\windows", r"c:\program files", r"c:\program files (x86)", r"c:\programdata"]
+        return any(value == root or value.startswith(root + "\\") for root in roots)
+
+    def test_denylist_case_dot_segment_trailing_separator_and_boundaries(self):
+        denied = [
+            "C:\\",
+            r"c:\WINDOWS\\",
+            r"C:\temp\..\Windows\System32",
+            r"C:\PROGRAM FILES\Vendor",
+            r"C:\Program Files (x86)\Tool",
+            r"C:\ProgramData\.\Vendor",
+        ]
+        allowed = [r"C:\Projects\App", r"C:\WindowsOld\App", r"D:\Windows\App"]
+        self.assertTrue(all(self.blocked(path) for path in denied))
+        self.assertTrue(all(not self.blocked(path) for path in allowed))
+
+    def test_ten_entry_recency_dedup_pruning_and_unc_history_contract(self):
+        values = [
+            r"C:\Projects\Newest",
+            r"c:\projects\newest",
+            r"C:\Projects\Missing",
+            r"\\server\share\Repo",
+        ] + [rf"D:\Projects\P{i}" for i in range(20)]
+        seen, result = set(), []
+        for value in values:
+            canonical = ntpath.normpath(value)
+            if canonical.casefold() == ntpath.normpath(r"C:\Projects\Missing").casefold():
+                continue
+            key = canonical.casefold()
+            if key not in seen:
+                seen.add(key)
+                result.append(canonical)
+            if len(result) == 10:
+                break
+        self.assertEqual(len(result), 10)
+        self.assertEqual(result[0], r"C:\Projects\Newest")
+        self.assertIn(r"\\server\share\Repo", result)
+        self.assertNotIn(r"C:\Projects\Missing", result)
+        self.assertNotIn(r"D:\Projects\P19", result)
 
 
 if __name__ == "__main__":

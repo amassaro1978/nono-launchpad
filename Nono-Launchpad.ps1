@@ -1,123 +1,54 @@
 #requires -Version 5.1
 <#
-Nono Launchpad.
-
-Security model:
-- The configured credential is encrypted with Windows DPAPI for the current user.
-- The plaintext value is never written to disk, placed in a command line, or logged.
-- Launch mode decrypts it only long enough to place it in the launcher's process
-  environment. WSL imports it through WSLENV for the lifetime of that process tree.
-- The WSL Bash interactive login-shell process and every startup file it loads
-  inherit the credential before nono starts. Those startup files are part of
-  the trusted boundary.
-- The configured credential variable is prohibited in {ENV:NAME} arguments so
-  its value cannot be intentionally expanded into the spawned command's argv.
-
-This utility is not a credential broker. Review the accompanying README.
+OpenCode-only Nono Launchpad for Windows PowerShell 5.1 and WSL.
+Credentials remain DPAPI-encrypted and are imported into WSL only through the
+current process environment and WSLENV. They are never placed in argv or files.
 #>
 
 [CmdletBinding()]
 param(
     [ValidateSet('Gui', 'Launch', 'Shell')]
     [string]$Mode = 'Gui',
-
-    [string]$Agent,
-
-    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')]
-    [string]$Project
+    [string]$Agent = 'OpenCode',
+    [string]$ProjectPath
 )
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 
+# Change this one value to rebrand every user-visible launchpad surface.
+$DisplayName = 'Nono Launchpad'
+$DisplayVersion = '1.0.0'
+$ProjectHistoryLimit = 10
+
 # =========================== EDIT SETTINGS HERE ==============================
-# CredentialVariable is the *actual* environment-variable name expected by the
-# agents/proxy. PROXY_API_KEY is only a configurable default; replace it here.
-#
-# Add/remove agents only in Agents. Each entry supports:
-#   Profile       nono profile name or file path
-#   Command       executable passed after nono's -- separator
-#   NonoArguments additional nono options before -- (safe string array)
-#   AgentArguments arguments passed to the executable (safe string array)
-#
-# Neutral examples (comments only; no options are active by default):
-#   NonoArguments  = @('--option-name', '{ENV:SERVICE_HOST}')
-#   AgentArguments = @('--agent-option', 'example value')
-# Use an exact {ENV:VARIABLE_NAME} item when an argument must come from the
-# launch environment. Plain '$VARIABLE_NAME' is intentionally passed literally.
-# Arguments are individually shell-quoted; do not combine multiple arguments
-# into one string.
-#
-# RemoteFiles contains exactly the six files refreshed immediately before each
-# agent launch and Open Shell handoff. Leave Url empty to disable that file.
-# Destinations must begin
-# with ~/ and are resolved against the default Linux user's home directory.
-# Do not place credentials in URLs; use the WSL user's approved curl auth.
 $Config = @{
     Distro            = 'Nono-1-0-0'
     LinuxUser         = 'nono'
-    ProjectRoot       = 'projects' # relative to the WSL user's $HOME
     DefaultAgent      = 'OpenCode'
-    # Match Open Shell by loading the interactive login environment for both
-    # readiness and agent launch. Set false only for a deliberately minimal shell.
     UseInteractiveAgentShell = $true
     CredentialVariable = 'PROXY_API_KEY'
     CredentialFile    = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\credential.dpapi'
+    ProjectHistoryFile = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\projects.json'
     CurlConnectTimeoutSeconds = 10
     CurlMaxTimeSeconds = 60
     RemoteFiles       = [ordered]@{
-        'Claude nono profile' = @{
-            Url = ''
-            Destination = '~/.config/nono/profiles/claude.jsonc'
-        }
-        'Codex nono profile' = @{
-            Url = ''
-            Destination = '~/.config/nono/profiles/codex.jsonc'
-        }
         'OpenCode nono profile' = @{
             Url = ''
             Destination = '~/.config/nono/profiles/opencode.jsonc'
-        }
-        'Claude config' = @{
-            Url = ''
-            Destination = '~/.claude/settings.json'
-        }
-        'Codex config' = @{
-            Url = ''
-            Destination = '~/.codex/config.toml'
         }
         'OpenCode config' = @{
             Url = ''
             Destination = '~/.config/opencode/opencode.jsonc'
         }
     }
-    # Configurable local profiles refreshed above before each launch.
-    # Keep each path aligned with its RemoteFiles destination.
     Agents            = [ordered]@{
-        'Claude Code' = @{
-            Profile = 'claude'
-            Command = 'claude'
-            NonoArguments = @('--allow-cwd')
-            AgentArguments = @()
-        }
-        'Codex' = @{
-            Profile = 'codex'
-            Command = 'codex'
-            NonoArguments = @('--allow-cwd')
-            AgentArguments = @()
-        }
         'OpenCode' = @{
             Profile = 'opencode'
             Command = 'opencode'
             NonoArguments = @('--allow-cwd')
             AgentArguments = @()
         }
-        # 'Future Agent' = @{
-        #     Profile = '/home/account/profile.json'
-        #     Command = 'future-agent'
-        #     NonoArguments = @()
-        #     AgentArguments = @()
-        # }
     }
 }
 # ========================= END EDIT SETTINGS HERE ============================
@@ -125,59 +56,48 @@ $Config = @{
 function Assert-Configuration {
     if ($Config.Distro -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'Unsafe Distro setting.' }
     if ($Config.LinuxUser -notmatch '^[a-z_][a-z0-9_-]{0,31}$') { throw 'Unsafe LinuxUser setting.' }
-    if ($Config.ProjectRoot -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { throw 'Unsafe ProjectRoot setting.' }
     if ($Config.UseInteractiveAgentShell -isnot [bool]) { throw 'UseInteractiveAgentShell must be true or false.' }
     if ($Config.CredentialVariable -notmatch '^[A-Za-z_][A-Za-z0-9_]*$') { throw 'CredentialVariable must be a valid environment-variable name.' }
+    if ($Config.RemoteFiles.Count -ne 2) { throw 'RemoteFiles must contain exactly the OpenCode profile and config.' }
+    if ($Config.Agents.Count -ne 1 -or -not $Config.Agents.Contains('OpenCode') -or $Config.DefaultAgent -ne 'OpenCode') {
+        throw 'This release must contain only the OpenCode agent.'
+    }
     foreach ($timeoutName in @('CurlConnectTimeoutSeconds','CurlMaxTimeSeconds')) {
         if ($Config[$timeoutName] -isnot [int] -or $Config[$timeoutName] -lt 1) { throw "$timeoutName must be a positive integer." }
     }
     if ($Config.CurlMaxTimeSeconds -lt $Config.CurlConnectTimeoutSeconds) { throw 'CurlMaxTimeSeconds cannot be shorter than CurlConnectTimeoutSeconds.' }
-    if ($Config.RemoteFiles.Count -ne 6) { throw 'RemoteFiles must contain exactly six files.' }
-    if ($Config.Agents.Count -lt 1) { throw 'Configure at least one agent.' }
-    if (-not $Config.Agents.Contains([string]$Config.DefaultAgent)) { throw 'DefaultAgent must match a configured agent display name.' }
-
-    $remoteDestinations = @{}
+    $destinations = @{}
     foreach ($entry in $Config.RemoteFiles.GetEnumerator()) {
-        if ([string]::IsNullOrWhiteSpace([string]$entry.Key)) { throw 'Remote file names cannot be empty.' }
         foreach ($required in @('Url','Destination')) {
             if (-not $entry.Value.ContainsKey($required)) { throw "Remote file '$($entry.Key)' is missing $required." }
         }
         $url = [string]$entry.Value.Url
         if ($url -ne '' -and [string]::IsNullOrWhiteSpace($url)) { throw "Remote file '$($entry.Key)' has a whitespace-only Url." }
         if ($url -ne '') {
-            $parsedUrl = $null
-            if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsedUrl) -or
-                $parsedUrl.Scheme -ne 'https' -or
-                -not [string]::IsNullOrEmpty($parsedUrl.UserInfo)) {
-                throw "Remote file '$($entry.Key)' must use an HTTPS URL without embedded credentials."
+            $parsed = $null
+            if (-not [Uri]::TryCreate($url, [UriKind]::Absolute, [ref]$parsed) -or $parsed.Scheme -ne 'https' -or $parsed.UserInfo) {
+                throw "Remote file '$($entry.Key)' must use HTTPS without embedded credentials."
             }
         }
         $destination = [string]$entry.Value.Destination
         if ($destination -notmatch '^~/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$' -or
-            @($destination.Substring(2) -split '/' | Where-Object { $_ -eq '.' -or $_ -eq '..' }).Count -gt 0) {
-            throw "Remote file '$($entry.Key)' has an unsafe Destination. Use a path below ~/ without dot or dot-dot segments."
+            @($destination.Substring(2) -split '/' | Where-Object { $_ -in @('.','..') }).Count -gt 0) {
+            throw "Remote file '$($entry.Key)' has an unsafe Destination."
         }
-        if ($remoteDestinations.ContainsKey($destination)) { throw "Remote file destination '$destination' is duplicated." }
-        $remoteDestinations[$destination] = $true
+        if ($destinations.ContainsKey($destination)) { throw "Duplicate remote destination '$destination'." }
+        $destinations[$destination] = $true
     }
-
-    foreach ($entry in $Config.Agents.GetEnumerator()) {
-        if ([string]::IsNullOrWhiteSpace([string]$entry.Key)) { throw 'Agent display names cannot be empty.' }
-        foreach ($required in @('Profile','Command','NonoArguments','AgentArguments')) {
-            if (-not $entry.Value.ContainsKey($required)) { throw "Agent '$($entry.Key)' is missing $required." }
-        }
-        if ([string]::IsNullOrWhiteSpace([string]$entry.Value.Profile)) { throw "Agent '$($entry.Key)' has an empty Profile." }
-        if ([string]::IsNullOrWhiteSpace([string]$entry.Value.Command)) { throw "Agent '$($entry.Key)' has an empty Command." }
-        foreach ($argument in @($entry.Value.NonoArguments) + @($entry.Value.AgentArguments)) {
-            if ($null -eq $argument -or ([string]$argument).IndexOf([char]0) -ge 0) { throw "Agent '$($entry.Key)' contains an invalid argument." }
-            $text = [string]$argument
-            $placeholder = [regex]::Match($text, '^\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}$')
-            if ($text -match '^\{ENV:' -and -not $placeholder.Success) {
-                throw "Agent '$($entry.Key)' contains an invalid environment placeholder: $text"
-            }
-            if ($placeholder.Success -and [StringComparer]::OrdinalIgnoreCase.Equals($placeholder.Groups[1].Value, [string]$Config.CredentialVariable)) {
-                throw "Agent '$($entry.Key)' cannot expand the configured credential into a command argument."
-            }
+    $agentConfig = $Config.Agents.OpenCode
+    foreach ($required in @('Profile','Command','NonoArguments','AgentArguments')) {
+        if (-not $agentConfig.ContainsKey($required)) { throw "OpenCode is missing $required." }
+    }
+    foreach ($argument in @($agentConfig.NonoArguments) + @($agentConfig.AgentArguments)) {
+        if ($null -eq $argument -or ([string]$argument).IndexOf([char]0) -ge 0) { throw 'OpenCode contains an invalid argument.' }
+        $text = [string]$argument
+        $placeholder = [regex]::Match($text, '^\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}$')
+        if ($text -match '^\{ENV:' -and -not $placeholder.Success) { throw "Invalid environment placeholder: $text" }
+        if ($placeholder.Success -and [StringComparer]::OrdinalIgnoreCase.Equals($placeholder.Groups[1].Value, [string]$Config.CredentialVariable)) {
+            throw 'OpenCode cannot expand the configured credential into a command argument.'
         }
     }
 }
@@ -187,63 +107,24 @@ function ConvertTo-BashLiteral {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     return "'" + $Value.Replace("'", "'`"'`"'") + "'"
 }
-
 function ConvertTo-BashArgument {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     $placeholder = [regex]::Match($Value, '^\{ENV:([A-Za-z_][A-Za-z0-9_]*)\}$')
     if ($placeholder.Success) {
-        $variableName = $placeholder.Groups[1].Value
-        if ([StringComparer]::OrdinalIgnoreCase.Equals($variableName, [string]$Config.CredentialVariable)) {
-            throw 'The configured credential cannot be expanded into a command argument.'
-        }
-        # Expand only a validated non-credential variable; quotes preserve one argument.
-        return '"${' + $variableName + '}"'
+        $name = $placeholder.Groups[1].Value
+        if ([StringComparer]::OrdinalIgnoreCase.Equals($name, [string]$Config.CredentialVariable)) { throw 'The credential cannot be expanded into argv.' }
+        return '"${' + $name + '}"'
     }
     if ($Value -match '^\{ENV:') { throw "Invalid environment placeholder: $Value" }
     return ConvertTo-BashLiteral $Value
 }
-
 function ConvertTo-PowerShellLiteral {
     param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
     return "'" + $Value.Replace("'", "''") + "'"
 }
-
 function Test-AgentConfigured {
     param([AllowNull()][string]$Name)
-    return (-not [string]::IsNullOrWhiteSpace($Name)) -and $Config.Agents.Contains($Name)
-}
-
-function Test-ProjectName {
-    param([AllowNull()][string]$Name)
-    return (-not [string]::IsNullOrWhiteSpace($Name)) -and
-        ($Name -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
-}
-
-function Get-BashCommandArguments {
-    param(
-        [Parameter(Mandatory)][string]$LinuxScript,
-        [switch]$UseAgentShell
-    )
-    $arguments = @('-l')
-    if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $arguments += '-i' }
-    $arguments += @('-c', $LinuxScript)
-    return $arguments
-}
-
-function Invoke-WslText {
-    param(
-        [Parameter(Mandatory)][string]$LinuxScript,
-        [switch]$UseAgentShell
-    )
-    $bashArguments = @(Get-BashCommandArguments -LinuxScript $LinuxScript -UseAgentShell:$UseAgentShell)
-    $output = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        if ($UseAgentShell) {
-            throw "WSL agent-environment check failed with exit code $LASTEXITCODE."
-        }
-        throw (($output | Out-String).Trim())
-    }
-    return @(($output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })
+    return [StringComparer]::Ordinal.Equals($Name, 'OpenCode')
 }
 
 function Test-DistroRegistered {
@@ -253,140 +134,216 @@ function Test-DistroRegistered {
     }
     catch { return $false }
 }
-
-function Test-CredentialConfigured {
-    return Test-Path -LiteralPath $Config.CredentialFile -PathType Leaf
-}
-
+function Test-CredentialConfigured { return Test-Path -LiteralPath $Config.CredentialFile -PathType Leaf }
 function Save-Credential {
     param([Parameter(Mandatory)][Security.SecureString]$SecureValue)
     if ($SecureValue.Length -lt 1) { throw 'The credential cannot be empty.' }
-
-    $directory = Split-Path -Parent $Config.CredentialFile
-    [void](New-Item -ItemType Directory -Path $directory -Force)
-
-    # On Windows PowerShell, no explicit key means DPAPI CurrentUser encryption.
-    $encrypted = ConvertFrom-SecureString -SecureString $SecureValue
-    Set-Content -LiteralPath $Config.CredentialFile -Value $encrypted -Encoding UTF8
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $Config.CredentialFile) -Force)
+    Set-Content -LiteralPath $Config.CredentialFile -Value (ConvertFrom-SecureString $SecureValue) -Encoding UTF8
 }
-
 function Get-StoredCredential {
     if (-not (Test-CredentialConfigured)) { throw "$($Config.CredentialVariable) has not been configured." }
     $encrypted = (Get-Content -LiteralPath $Config.CredentialFile -Raw).Trim()
-    if ([string]::IsNullOrWhiteSpace($encrypted)) { throw 'The encrypted credential file is empty.' }
+    if (-not $encrypted) { throw 'The encrypted credential file is empty.' }
     return ConvertTo-SecureString -String $encrypted
 }
-
 function Invoke-WithCredentialEnvironment {
     param([Parameter(Mandatory)][scriptblock]$Action)
-
-    $variableName = $Config.CredentialVariable
+    $variableName = [string]$Config.CredentialVariable
     $secure = Get-StoredCredential
-    $bstr = [IntPtr]::Zero
-    $plain = $null
+    $bstr = [IntPtr]::Zero; $plain = $null
     $previousValue = [Environment]::GetEnvironmentVariable($variableName, 'Process')
     $previousWslEnv = [Environment]::GetEnvironmentVariable('WSLENV', 'Process')
-
     try {
         $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
         $plain = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
         [Environment]::SetEnvironmentVariable($variableName, $plain, 'Process')
-
         $parts = @()
-        $variablePattern = '^' + [regex]::Escape($variableName) + '(?:/.*)?$'
-        if (-not [string]::IsNullOrWhiteSpace($previousWslEnv)) {
-            $parts = @($previousWslEnv -split ':' | Where-Object { $_ -and $_ -notmatch $variablePattern })
-        }
+        $pattern = '^' + [regex]::Escape($variableName) + '(?:/.*)?$'
+        if ($previousWslEnv) { $parts = @($previousWslEnv -split ':' | Where-Object { $_ -and $_ -notmatch $pattern }) }
         $parts += "$variableName/u"
         [Environment]::SetEnvironmentVariable('WSLENV', ($parts -join ':'), 'Process')
-
         & $Action
     }
     finally {
         [Environment]::SetEnvironmentVariable($variableName, $previousValue, 'Process')
         [Environment]::SetEnvironmentVariable('WSLENV', $previousWslEnv, 'Process')
         $plain = $null
-        if ($bstr -ne [IntPtr]::Zero) {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
+        if ($bstr -ne [IntPtr]::Zero) { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
         if ($null -ne $secure) { $secure.Dispose() }
     }
 }
 
-function New-CryptographicLaunchTempPath {
-    $randomBytes = New-Object byte[] 24
-    $generator = [Security.Cryptography.RandomNumberGenerator]::Create()
-    try { $generator.GetBytes($randomBytes) }
-    finally { $generator.Dispose() }
-    $token = -join @($randomBytes | ForEach-Object { $_.ToString('x2') })
-    return "/tmp/nono-launch-$token.sh"
-}
-
-function Get-RemoteRefreshScriptLines {
-    $connectTimeout = [string]$Config.CurlConnectTimeoutSeconds
-    $maxTime = [string]$Config.CurlMaxTimeSeconds
-    $lines = @(
-        'refresh_file() {'
-        '  label=$1; url=$2; relative_destination=$3'
-        '  [ -n "$url" ] || return 0'
-        '  destination="$HOME/$relative_destination"'
-        '  directory=${destination%/*}'
-        '  if ! mkdir -p -- "$directory"; then'
-        '    printf ''Warning: could not prepare destination for %s; keeping existing file if present.\n'' "$label" >&2'
-        '    return 0'
-        '  fi'
-        '  temporary=$(mktemp --tmpdir="$directory" ''.nono-launchpad-refresh.XXXXXXXXXX'') || {'
-        '    printf ''Warning: could not create a temporary file for %s; keeping existing file if present.\n'' "$label" >&2'
-        '    return 0'
-        '  }'
-        "  if curl --fail --silent --show-error --location --connect-timeout $connectTimeout --max-time $maxTime --proto '=https' --proto-redir '=https' --output `"`$temporary`" -- `"`$url`" &&"
-        '     mv -fT -- "$temporary" "$destination"; then'
-        '    printf ''Updated %s.\n'' "$label"'
-        '  else'
-        '    rm -f -- "$temporary"'
-        '    printf ''Warning: could not refresh %s; keeping existing file if present.\n'' "$label" >&2'
-        '  fi'
-        '}'
-    )
-    foreach ($entry in $Config.RemoteFiles.GetEnumerator()) {
-        $relativeDestination = ([string]$entry.Value.Destination).Substring(2)
-        $lines += 'refresh_file ' + (ConvertTo-BashLiteral ([string]$entry.Key)) + ' ' +
-            (ConvertTo-BashLiteral ([string]$entry.Value.Url)) + ' ' +
-            (ConvertTo-BashLiteral $relativeDestination)
+function Initialize-FinalPathApi {
+    if ('NonoLaunchpad.NativePath' -as [type]) { return }
+    Add-Type -TypeDefinition @'
+using System;
+using System.Text;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+namespace NonoLaunchpad {
+  public static class NativePath {
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
+    public static string GetFinalDirectoryPath(string path) {
+      using (SafeFileHandle handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
+        if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        StringBuilder buffer = new StringBuilder(32768);
+        uint result = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+        if (result == 0 || result >= buffer.Capacity) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        string value = buffer.ToString();
+        if (value.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase)) return @"\\" + value.Substring(8);
+        if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) return value.Substring(4);
+        return value;
+      }
     }
-    return $lines
+  }
+}
+'@
+}
+function Test-PathAtOrBelow {
+    param([Parameter(Mandatory)][string]$Candidate, [Parameter(Mandatory)][string]$Root)
+    $candidateValue = $Candidate.TrimEnd('\')
+    $rootValue = $Root.TrimEnd('\')
+    return [StringComparer]::OrdinalIgnoreCase.Equals($candidateValue, $rootValue) -or
+        $candidateValue.StartsWith($rootValue + '\', [StringComparison]::OrdinalIgnoreCase)
+}
+function Get-SensitiveWindowsRoots {
+    $values = @('C:\', 'C:\Windows', 'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData')
+    foreach ($name in @('SystemRoot','windir','ProgramFiles','ProgramFiles(x86)','ProgramW6432','ProgramData')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if ($value) { $values += $value }
+    }
+    return @($values | ForEach-Object {
+        try { [IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables([string]$_)).TrimEnd('\') }
+        catch { $null }
+    } | Where-Object { $_ } | Select-Object -Unique)
+}
+function Resolve-WindowsProjectPath {
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or $Path.IndexOf([char]0) -ge 0 -or $Path -match '[\x00-\x1F]') {
+        throw 'Select a valid Windows project directory.'
+    }
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
+    if ($expanded.StartsWith('\\?\') -or $expanded.StartsWith('\\.\')) {
+        throw 'Extended-device and device namespace paths are not accepted as project paths.'
+    }
+    if ($expanded -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)') {
+        throw 'Project path must be an absolute local-drive or UNC/network path.'
+    }
+    try { $lexical = [IO.Path]::GetFullPath($expanded.Replace('/', '\')) }
+    catch { throw 'The project path is not a valid Windows path.' }
+    if (-not (Test-Path -LiteralPath $lexical -PathType Container)) { throw 'The selected project directory does not exist or is not accessible.' }
+    Initialize-FinalPathApi
+    try { $final = [NonoLaunchpad.NativePath]::GetFinalDirectoryPath($lexical).TrimEnd('\') }
+    catch { throw "The selected project directory could not be canonicalized: $($_.Exception.Message)" }
+    if ($final -match '^[A-Za-z]:$') { $final += '\' }
+    foreach ($candidate in @($lexical, $final)) {
+        foreach ($root in Get-SensitiveWindowsRoots) {
+            $isDriveRoot = $root -match '^[A-Za-z]:$'
+            $blocked = if ($isDriveRoot) {
+                [StringComparer]::OrdinalIgnoreCase.Equals($candidate.TrimEnd('\'), $root)
+            } else {
+                Test-PathAtOrBelow -Candidate $candidate -Root $root
+            }
+            if ($blocked) {
+                throw 'For safety, the C:\ root, Windows, Program Files, Program Files (x86), and ProgramData trees cannot be used as projects.'
+            }
+        }
+    }
+    return $final
+}
+function ConvertTo-WslProjectPath {
+    param([Parameter(Mandatory)][string]$WindowsPath)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($WindowsPath))
+    $scriptText = @"
+set -e
+windows_path=`$(printf %s $encoded | base64 -d)
+linux_path=`$(wslpath -a -u -- "`$windows_path")
+[ -d "`$linux_path" ] || { printf '%s\n' 'The project path is not accessible inside WSL.' >&2; exit 24; }
+printf '%s\n' "`$linux_path"
+"@
+    $lines = @(Invoke-WslScriptText -LinuxScript $scriptText -UseCredential:$false)
+    if ($lines.Count -ne 1 -or -not ([string]$lines[0]).StartsWith('/')) { throw 'WSL could not convert the project directory to one accessible Linux path.' }
+    return [string]$lines[0]
 }
 
+function Save-ProjectHistory {
+    param([string[]]$Paths)
+    $directory = Split-Path -Parent $Config.ProjectHistoryFile
+    [void](New-Item -ItemType Directory -Path $directory -Force)
+    $temporary = Join-Path $directory ('.projects.' + [Guid]::NewGuid().ToString('N') + '.tmp')
+    try {
+        $limitedPaths = @($Paths | Select-Object -First $ProjectHistoryLimit)
+        ConvertTo-Json -InputObject $limitedPaths -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Move-Item -LiteralPath $temporary -Destination $Config.ProjectHistoryFile -Force
+    }
+    finally { if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue } }
+}
+function Get-ProjectHistory {
+    $inputPaths = @()
+    $needsRewrite = $false
+    if (Test-Path -LiteralPath $Config.ProjectHistoryFile -PathType Leaf) {
+        try { $inputPaths = @((Get-Content -LiteralPath $Config.ProjectHistoryFile -Raw | ConvertFrom-Json)) }
+        catch { $inputPaths = @(); $needsRewrite = $true }
+    }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $valid = New-Object System.Collections.Generic.List[string]
+    foreach ($path in $inputPaths) {
+        try {
+            $canonical = Resolve-WindowsProjectPath ([string]$path)
+            if ($seen.Add($canonical)) { $valid.Add($canonical) }
+            if ($valid.Count -eq $ProjectHistoryLimit) { break }
+        }
+        catch { }
+    }
+    if ($needsRewrite -or @($inputPaths).Count -ne $valid.Count -or ((@($inputPaths) -join "`n") -cne (($valid.ToArray()) -join "`n"))) { Save-ProjectHistory -Paths $valid.ToArray() }
+    return $valid.ToArray()
+}
+function Add-ProjectHistory {
+    param([Parameter(Mandatory)][string]$Path)
+    $canonical = Resolve-WindowsProjectPath $Path
+    $all = New-Object System.Collections.Generic.List[string]
+    $all.Add($canonical)
+    foreach ($existing in @(Get-ProjectHistory)) {
+        if (-not [StringComparer]::OrdinalIgnoreCase.Equals($canonical, $existing)) { $all.Add($existing) }
+    }
+    Save-ProjectHistory -Paths $all.ToArray()
+    return $canonical
+}
+
+function Invoke-WslScriptText {
+    param([Parameter(Mandatory)][string]$LinuxScript, [bool]$UseCredential = $true)
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LinuxScript))
+    $bootstrap = "printf %s $encoded | base64 -d | bash"
+    $runner = {
+        $output = @(& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $bootstrap 2>&1)
+        $exitCode = $LASTEXITCODE
+        if ($exitCode -ne 0) { throw (($output | Out-String).Trim()) }
+        return @(($output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })
+    }
+    if ($UseCredential) { return @(Invoke-WithCredentialEnvironment $runner) }
+    return @(& $runner)
+}
+function New-CryptographicLaunchTempPath {
+    $bytes = New-Object byte[] 24
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
+    return '/tmp/nono-launch-' + (-join @($bytes | ForEach-Object { $_.ToString('x2') })) + '.sh'
+}
 function Invoke-GeneratedLinuxScript {
-    param(
-        [Parameter(Mandatory)][string]$LinuxScript,
-        [Parameter(Mandatory)][string]$OperationName,
-        [switch]$UseAgentShell,
-        [switch]$CheckExecutionExitCode
-    )
+    param([Parameter(Mandatory)][string]$LinuxScript, [Parameter(Mandatory)][string]$OperationName, [switch]$UseAgentShell, [switch]$CheckExecutionExitCode)
     $encodedScript = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LinuxScript))
     $temporaryLinuxPath = New-CryptographicLaunchTempPath
-    # WinPS 5.1 native-argument serialization plus wsl.exe's command-shell
-    # pass do not reliably preserve multiline bash -c text. That extra parse
-    # can expand variables intended for the generated script (for example,
-    # $directory) before its Bash function runs. Base64 and the generated path
-    # are restricted to shell-safe characters, so insert them directly without
-    # nested quoting.
     $createBootstrap = "umask 077; set -C; printf %s $encodedScript | base64 -d > $temporaryLinuxPath && chmod 700 $temporaryLinuxPath"
-
     try {
-        # The bootstrap, base64 text, and path contain no credential. set -C
-        # rejects the already-improbable case where the random path exists.
         & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $createBootstrap
-        $creationExitCode = $LASTEXITCODE
-        if ($creationExitCode -ne 0) {
-            throw "Could not create the temporary WSL script for $OperationName (exit code $creationExitCode)."
-        }
-
+        if ($LASTEXITCODE -ne 0) { throw "Could not create the temporary WSL script for $OperationName (exit code $LASTEXITCODE)." }
         $bashArguments = @('-l')
         if ($UseAgentShell -and $Config.UseInteractiveAgentShell) { $bashArguments += '-i' }
         $bashArguments += $temporaryLinuxPath
-
         Invoke-WithCredentialEnvironment {
             & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash @bashArguments
             $exitCode = $LASTEXITCODE
@@ -394,590 +351,338 @@ function Invoke-GeneratedLinuxScript {
         }
     }
     finally {
-        # Normally the script removes itself before its final exec. This handles
-        # creation, startup, and self-delete failures without masking the result.
-        try { $null = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- rm -f -- $temporaryLinuxPath 2>$null }
-        catch { }
+        try { $null = & wsl.exe -d $Config.Distro -u $Config.LinuxUser -- rm -f -- $temporaryLinuxPath 2>$null } catch { }
     }
 }
 
-function Invoke-AgentInCurrentConsole {
-    param(
-        [Parameter(Mandatory)][string]$AgentName,
-        [Parameter(Mandatory)][string]$ProjectName
-    )
-    if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
-    if (-not (Test-AgentConfigured $AgentName)) { throw 'Unknown agent.' }
-    if (-not (Test-DistroRegistered)) { throw "WSL distribution '$($Config.Distro)' is not registered." }
-
-    $agentConfig = $Config.Agents[$AgentName]
-    $root = $Config.ProjectRoot
-    $quotedParts = @(
-        (ConvertTo-BashLiteral 'nono'),
-        (ConvertTo-BashLiteral 'run'),
-        (ConvertTo-BashLiteral '--profile'),
-        (ConvertTo-BashLiteral ([string]$agentConfig.Profile))
-    )
-    $quotedParts += @($agentConfig.NonoArguments | ForEach-Object { ConvertTo-BashArgument ([string]$_) })
-    $quotedParts += @((ConvertTo-BashLiteral '--'), (ConvertTo-BashLiteral ([string]$agentConfig.Command)))
-    $quotedParts += @($agentConfig.AgentArguments | ForEach-Object { ConvertTo-BashArgument ([string]$_) })
-    $quotedLaunch = $quotedParts -join ' '
-
-    # Project names/root are constrained above. Ordinary configurable arguments
-    # are single-quoted. Exact {ENV:NAME} items become validated, double-quoted
-    # runtime expansions. The credential arrives only through the environment.
-    # A script file avoids passing the generated command through bash -c after
-    # PowerShell 5.1 and wsl.exe have each performed argument processing.
-    $remoteRefreshLines = @(Get-RemoteRefreshScriptLines)
-    $agentPreparationLines = @()
-    if ([string]$agentConfig.Command -eq 'claude') {
-        # The Claude nono profile can grant access to this path only when it
-        # exists before `nono run` builds the sandbox. /tmp is cleared on reboot.
-        $agentPreparationLines = @(
-            'claude_temp="/tmp/claude-$(id -u)"'
-            'if ! mkdir -p -- "$claude_temp" || [ -L "$claude_temp" ] || ! [ -d "$claude_temp" ] || ! [ -O "$claude_temp" ] ||'
-            '   ! chmod 700 "$claude_temp" || ! [ -r "$claude_temp" ] || ! [ -w "$claude_temp" ] || ! [ -x "$claude_temp" ]; then'
-            '  printf ''%s\n'' "Unable to prepare secure Claude temporary directory $claude_temp (expected current-user ownership and mode 700)." >&2'
-            '  exit 22'
-            'fi'
-        )
+function Invoke-OpenCodeFileOperation {
+    param([Parameter(Mandatory)]$Entry, [ValidateSet('Probe','Update','Decline')][string]$Action, [string]$ExpectedHash)
+    $label = [string]$Entry.Key; $url = [string]$Entry.Value.Url
+    if (-not $url) { return [pscustomobject]@{ Status='Disabled'; Label=$label; Hash=''; Detail='' } }
+    $relative = ([string]$Entry.Value.Destination).Substring(2)
+    $stateKeyBytes = [Text.Encoding]::UTF8.GetBytes($relative)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { $stateKey = -join @($sha.ComputeHash($stateKeyBytes) | ForEach-Object { $_.ToString('x2') }) } finally { $sha.Dispose() }
+    $qLabel = ConvertTo-BashLiteral $label; $qUrl = ConvertTo-BashLiteral $url; $qRelative = ConvertTo-BashLiteral $relative
+    $connect = [int]$Config.CurlConnectTimeoutSeconds; $maximum = [int]$Config.CurlMaxTimeSeconds
+    if ($Action -eq 'Decline') {
+        if ($ExpectedHash -notmatch '^[a-f0-9]{64}$') { throw 'Invalid upstream hash for Keep Existing.' }
+        $scriptText = @"
+set -e
+state_dir="`$HOME/.local/state/nono-launchpad/declined"
+mkdir -p -- "`$state_dir"
+temporary=`$(mktemp --tmpdir="`$state_dir" '.declined.XXXXXXXXXX')
+printf '%s\n' '$ExpectedHash' > "`$temporary"
+mv -fT -- "`$temporary" "`$state_dir/$stateKey.sha256"
+printf '%s\t%s\t%s\n' DECLINED $qLabel '$ExpectedHash'
+"@
     }
+    else {
+        $expectedCheck = ':'
+        if ($Action -eq 'Update') {
+            $expectedCheck = '[ "$upstream_hash" = ' + (ConvertTo-BashLiteral $ExpectedHash) + " ] || { printf '%s\\t%s\\t%s\\n' OFFLINE $qLabel 'upstream changed during update'; exit 0; }"
+            $applyBlock = @"
+if [ -e "`$destination" ]; then
+  stamp=`$(date -u +%Y%m%dT%H%M%SZ); backup="`$destination.backup.`$stamp"; suffix=0
+  while [ -e "`$backup" ]; do suffix=`$((suffix+1)); backup="`$destination.backup.`$stamp.`$suffix"; done
+  cp -a -- "`$destination" "`$backup" || { printf '%s\t%s\t%s\n' OFFLINE $qLabel 'backup failed'; exit 0; }
+fi
+if ! mv -fT -- "`$temporary" "`$destination"; then
+  printf '%s\t%s\t%s\n' OFFLINE $qLabel 'atomic replace failed'; exit 0
+fi
+rm -f -- "`$declined_file"
+printf '%s\t%s\t%s\n' UPDATED $qLabel "`$upstream_hash"
+exit 0
+"@
+        }
+        else {
+            $applyBlock = @"
+if [ ! -e "`$destination" ]; then
+  if ! mv -fT -- "`$temporary" "`$destination"; then
+    printf '%s\t%s\t%s\n' OFFLINE $qLabel 'atomic install failed'; exit 0
+  fi
+  printf '%s\t%s\t%s\n' INSTALLED $qLabel "`$upstream_hash"
+  exit 0
+fi
+if cmp -s -- "`$temporary" "`$destination"; then printf '%s\t%s\t%s\n' SAME $qLabel "`$upstream_hash"; exit 0; fi
+if [ -f "`$declined_file" ] && [ "`$(cat -- "`$declined_file")" = "`$upstream_hash" ]; then
+  printf '%s\t%s\t%s\n' DECLINED $qLabel "`$upstream_hash"; exit 0
+fi
+printf '%s\t%s\t%s\n' CHANGED $qLabel "`$upstream_hash"
+exit 0
+"@
+        }
+        $scriptText = @"
+set -u
+destination="`$HOME/$relative"; directory=`${destination%/*}
+state_dir="`$HOME/.local/state/nono-launchpad/declined"; declined_file="`$state_dir/$stateKey.sha256"
+mkdir -p -- "`$directory" "`$state_dir" || { printf '%s\t%s\t%s\n' OFFLINE $qLabel 'cannot prepare destination'; exit 0; }
+temporary=`$(mktemp --tmpdir="`$directory" '.nono-launchpad-download.XXXXXXXXXX') || { printf '%s\t%s\t%s\n' OFFLINE $qLabel 'cannot create temporary file'; exit 0; }
+trap 'rm -f -- "`$temporary"' EXIT
+if ! curl --fail --silent --show-error --location --connect-timeout $connect --max-time $maximum --proto '=https' --proto-redir '=https' --output "`$temporary" -- $qUrl; then
+  printf '%s\t%s\t%s\n' OFFLINE $qLabel 'repository unavailable'; exit 0
+fi
+if [ ! -s "`$temporary" ] || [ ! -f "`$temporary" ] || [ -L "`$temporary" ] || ! grep -q '[{}]' "`$temporary"; then
+  printf '%s\t%s\t%s\n' OFFLINE $qLabel 'download validation failed'; exit 0
+fi
+upstream_hash=`$(sha256sum -- "`$temporary" | awk '{print `$1}')
+$expectedCheck
+$applyBlock
+"@
+    }
+    try {
+        $line = [string](@(Invoke-WslScriptText -LinuxScript $scriptText -UseCredential:$true) | Select-Object -Last 1)
+        $parts = $line -split "`t", 3
+        if ($parts.Count -lt 2) { throw 'Unexpected synchronization response.' }
+        return [pscustomobject]@{ Status=$parts[0]; Label=$parts[1]; Hash=$(if ($parts.Count -gt 2 -and $parts[2] -match '^[a-f0-9]{64}$') { $parts[2] } else { '' }); Detail=$(if ($parts.Count -gt 2) { $parts[2] } else { '' }) }
+    }
+    catch { return [pscustomobject]@{ Status='Offline'; Label=$label; Hash=''; Detail=$_.Exception.Message } }
+}
+function Invoke-OpenCodeSyncProbe {
+    $results = @()
+    foreach ($entry in $Config.RemoteFiles.GetEnumerator()) { $results += Invoke-OpenCodeFileOperation -Entry $entry -Action Probe }
+    return $results
+}
+function Set-OpenCodeSyncDecision {
+    param([Parameter(Mandatory)][object[]]$Changes, [ValidateSet('Update','Decline')][string]$Action)
+    $results = @()
+    foreach ($change in $Changes) {
+        $entry = $Config.RemoteFiles.GetEnumerator() | Where-Object { [string]$_.Key -eq [string]$change.Label } | Select-Object -First 1
+        if ($null -eq $entry) { throw "Unknown synchronized file '$($change.Label)'." }
+        $results += Invoke-OpenCodeFileOperation -Entry $entry -Action $Action -ExpectedHash ([string]$change.Hash)
+    }
+    return $results
+}
+
+function Get-OpenCodeCommand {
+    $agentConfig = $Config.Agents.OpenCode
+    $parts = @((ConvertTo-BashLiteral 'nono'),(ConvertTo-BashLiteral 'run'),(ConvertTo-BashLiteral '--profile'),(ConvertTo-BashLiteral ([string]$agentConfig.Profile)))
+    $parts += @($agentConfig.NonoArguments | ForEach-Object { ConvertTo-BashArgument ([string]$_) })
+    $parts += @((ConvertTo-BashLiteral '--'),(ConvertTo-BashLiteral ([string]$agentConfig.Command)))
+    $parts += @($agentConfig.AgentArguments | ForEach-Object { ConvertTo-BashArgument ([string]$_) })
+    return $parts -join ' '
+}
+function Invoke-AgentInCurrentConsole {
+    param([Parameter(Mandatory)][string]$AgentName, [Parameter(Mandatory)][string]$WindowsProjectPath)
+    if (-not (Test-AgentConfigured $AgentName)) { throw 'This release supports OpenCode only.' }
+    if (-not (Test-DistroRegistered)) { throw "WSL distribution '$($Config.Distro)' is not registered." }
+    $canonical = Resolve-WindowsProjectPath $WindowsProjectPath
+    $wslPath = ConvertTo-WslProjectPath $canonical
+    [void](Add-ProjectHistory $canonical)
+    $sync = @(Invoke-OpenCodeSyncProbe)
+    foreach ($item in $sync | Where-Object { $_.Status -in @('Changed','Offline') }) { Write-Warning "$($item.Label): $($item.Status); keeping the existing local file." }
+    $quotedLaunch = Get-OpenCodeCommand
     $linuxScript = @(
         '#!/usr/bin/env bash'
         'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary launch script.'' >&2; exit 21; }'
         'export PATH="$HOME/.local/bin:$PATH"'
-        "cd `"`$HOME/$root/$ProjectName`" || exit 20"
-    ) + $remoteRefreshLines + $agentPreparationLines + @(
+        'cd -- ' + (ConvertTo-BashLiteral $wslPath) + ' || exit 20'
         "exec $quotedLaunch"
-    )
-    $linuxScript = $linuxScript -join "`n"
+    ) -join "`n"
     $linuxScript += "`n"
-    Write-Host "Launching $AgentName in ~/$root/$ProjectName ..." -ForegroundColor Cyan
+    Write-Host "Launching OpenCode in $canonical ..." -ForegroundColor Cyan
     Write-Host "Command structure: $quotedLaunch" -ForegroundColor DarkGray
-    Write-Host ''
-    Invoke-GeneratedLinuxScript -LinuxScript $linuxScript -OperationName 'The sandboxed agent' -UseAgentShell -CheckExecutionExitCode
+    Invoke-GeneratedLinuxScript -LinuxScript $linuxScript -OperationName 'OpenCode' -UseAgentShell -CheckExecutionExitCode
 }
-
 function Open-ShellInCurrentConsole {
-    param([string]$ProjectName)
+    param([string]$WindowsProjectPath)
     if (-not (Test-DistroRegistered)) { throw "WSL distribution '$($Config.Distro)' is not registered." }
-    $root = $Config.ProjectRoot
-    if ([string]::IsNullOrWhiteSpace($ProjectName)) {
-        $changeDirectory = 'cd "$HOME" || exit 20'
+    $changeDirectory = 'cd "$HOME" || exit 20'
+    if ($WindowsProjectPath) {
+        $canonical = Resolve-WindowsProjectPath $WindowsProjectPath
+        $wslPath = ConvertTo-WslProjectPath $canonical
+        [void](Add-ProjectHistory $canonical)
+        $changeDirectory = 'cd -- ' + (ConvertTo-BashLiteral $wslPath) + ' || exit 20'
     }
-    else {
-        if (-not (Test-ProjectName $ProjectName)) { throw 'Invalid project name.' }
-        $changeDirectory = "cd `"`$HOME/$root/$ProjectName`" || exit 20"
-    }
-    $linux = @(
-        '#!/usr/bin/env bash'
-        'rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary shell script.'' >&2; exit 21; }'
-        $changeDirectory
-    ) + @(Get-RemoteRefreshScriptLines) + @('exec bash -l')
-    $linux = $linux -join "`n"
-    $linux += "`n"
-    Invoke-GeneratedLinuxScript -LinuxScript $linux -OperationName 'The WSL shell' -UseAgentShell
+    $sync = @(Invoke-OpenCodeSyncProbe)
+    foreach ($item in $sync | Where-Object { $_.Status -in @('Changed','Offline') }) { Write-Warning "$($item.Label): $($item.Status); keeping the existing local file." }
+    $linux = @('#!/usr/bin/env bash','rm -f -- "$0" || { printf ''%s\n'' ''Unable to remove temporary shell script.'' >&2; exit 21; }',$changeDirectory,'exec bash -l') -join "`n"
+    Invoke-GeneratedLinuxScript -LinuxScript ($linux + "`n") -OperationName 'the WSL shell' -UseAgentShell
 }
 
 if ($Mode -eq 'Launch') {
-    try { Invoke-AgentInCurrentConsole -AgentName $Agent -ProjectName $Project; exit 0 }
+    try { Invoke-AgentInCurrentConsole -AgentName $Agent -WindowsProjectPath $ProjectPath; exit 0 }
     catch {
-        Write-Host ''
-        Write-Host "Launch failed: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host 'The credential value was not printed. Review the error above, then press Enter to close this window.' -ForegroundColor Yellow
-        [void](Read-Host)
-        exit 1
+        Write-Host ''; Write-Host "$DisplayName launch failed: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host 'The credential value was not printed. Press Enter to close this window.' -ForegroundColor Yellow
+        [void](Read-Host); exit 1
     }
 }
 if ($Mode -eq 'Shell') {
-    try { Open-ShellInCurrentConsole -ProjectName $Project; exit 0 }
-    catch { Write-Error $_.Exception.Message; exit 1 }
+    try { Open-ShellInCurrentConsole -WindowsProjectPath $ProjectPath; exit 0 }
+    catch { Write-Error "$DisplayName shell failed: $($_.Exception.Message)"; exit 1 }
 }
 
-if ($env:OS -ne 'Windows_NT') { throw 'Nono Launchpad must run on Windows.' }
-if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') {
-    throw 'WPF requires STA mode. Start with: powershell.exe -STA -File .\Nono-Launchpad.ps1'
-}
-
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
+if ($env:OS -ne 'Windows_NT') { throw "$DisplayName must run on Windows." }
+if ([Threading.Thread]::CurrentThread.ApartmentState -ne 'STA') { throw "$DisplayName requires Windows PowerShell STA mode." }
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+Initialize-FinalPathApi
 
 [xml]$xaml = @'
-<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Nono Launchpad" Height="680" Width="880"
-        WindowStartupLocation="CenterScreen"
-        Background="#F3F6FA" FontFamily="Segoe UI" FontSize="13"
-        SnapsToDevicePixels="True" UseLayoutRounding="True">
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Height="650" Width="860" WindowStartupLocation="CenterScreen" Background="#F3F6FA" FontFamily="Segoe UI" FontSize="13">
   <Window.Resources>
-    <SolidColorBrush x:Key="InkBrush" Color="#172033"/>
-    <SolidColorBrush x:Key="MutedBrush" Color="#5F6B7A"/>
-    <SolidColorBrush x:Key="BlueBrush" Color="#2563A6"/>
-    <SolidColorBrush x:Key="BlueDarkBrush" Color="#1D4F86"/>
-    <SolidColorBrush x:Key="LineBrush" Color="#D9E1EA"/>
-    <SolidColorBrush x:Key="FieldBrush" Color="#F8FAFC"/>
-
-    <Style x:Key="CardStyle" TargetType="Border">
-      <Setter Property="Background" Value="White"/>
-      <Setter Property="BorderBrush" Value="{StaticResource LineBrush}"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="CornerRadius" Value="8"/>
-      <Setter Property="Padding" Value="18"/>
-    </Style>
-
-    <Style x:Key="SectionTitleStyle" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="{StaticResource InkBrush}"/>
-      <Setter Property="FontSize" Value="15"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-    </Style>
-
-    <Style x:Key="FieldLabelStyle" TargetType="TextBlock">
-      <Setter Property="Foreground" Value="{StaticResource MutedBrush}"/>
-      <Setter Property="FontSize" Value="12"/>
-      <Setter Property="Margin" Value="0,0,0,5"/>
-    </Style>
-
-    <Style TargetType="TextBox">
-      <Setter Property="MinHeight" Value="32"/>
-      <Setter Property="Padding" Value="8,5"/>
-      <Setter Property="VerticalContentAlignment" Value="Center"/>
-      <Setter Property="Background" Value="{StaticResource FieldBrush}"/>
-      <Setter Property="BorderBrush" Value="#C9D3DF"/>
-      <Setter Property="BorderThickness" Value="1"/>
-    </Style>
-
-    <Style TargetType="ComboBox">
-      <Setter Property="MinHeight" Value="32"/>
-      <Setter Property="Padding" Value="6,3"/>
-      <Setter Property="VerticalContentAlignment" Value="Center"/>
-      <Setter Property="Background" Value="{StaticResource FieldBrush}"/>
-      <Setter Property="BorderBrush" Value="#C9D3DF"/>
-      <Setter Property="BorderThickness" Value="1"/>
-    </Style>
-
-    <Style x:Key="SecondaryButtonStyle" TargetType="Button">
-      <Setter Property="Height" Value="34"/>
-      <Setter Property="MinWidth" Value="88"/>
-      <Setter Property="Padding" Value="14,0"/>
-      <Setter Property="Background" Value="White"/>
-      <Setter Property="Foreground" Value="{StaticResource InkBrush}"/>
-      <Setter Property="BorderBrush" Value="#B9C6D4"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="ButtonBorder" CornerRadius="5"
-                    Background="{TemplateBinding Background}"
-                    BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="{TemplateBinding BorderThickness}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"
-                                Margin="{TemplateBinding Padding}"/>
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.88"/>
-              </Trigger>
-              <Trigger Property="IsPressed" Value="True">
-                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.74"/>
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False">
-                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.48"/>
-              </Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
-
-    <Style TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}"/>
-
-    <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource SecondaryButtonStyle}">
-      <Setter Property="Height" Value="40"/>
-      <Setter Property="MinWidth" Value="190"/>
-      <Setter Property="Padding" Value="22,0"/>
-      <Setter Property="Background" Value="{StaticResource BlueBrush}"/>
-      <Setter Property="Foreground" Value="White"/>
-      <Setter Property="BorderBrush" Value="{StaticResource BlueDarkBrush}"/>
-      <Setter Property="FontSize" Value="14"/>
-    </Style>
+    <SolidColorBrush x:Key="Ink" Color="#172033"/><SolidColorBrush x:Key="Muted" Color="#5F6B7A"/><SolidColorBrush x:Key="Line" Color="#D9E1EA"/>
+    <Style TargetType="Button"><Setter Property="MinHeight" Value="34"/><Setter Property="Padding" Value="14,4"/><Setter Property="Margin" Value="4"/></Style>
+    <Style TargetType="ComboBox"><Setter Property="MinHeight" Value="34"/><Setter Property="Padding" Value="7,4"/></Style>
+    <Style x:Key="Card" TargetType="Border"><Setter Property="Background" Value="White"/><Setter Property="BorderBrush" Value="{StaticResource Line}"/><Setter Property="BorderThickness" Value="1"/><Setter Property="CornerRadius" Value="8"/><Setter Property="Padding" Value="18"/></Style>
   </Window.Resources>
-
-  <DockPanel LastChildFill="True">
-    <Border x:Name="LaunchStatusArea" DockPanel.Dock="Bottom"
-            Background="#F3F6FA" BorderBrush="{StaticResource LineBrush}"
-            BorderThickness="0,1,0,0" Padding="24,14">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="18"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <Border x:Name="LaunchStatusBanner" Grid.Column="0" Background="#FFF4E5"
-                BorderBrush="#E5C07B" BorderThickness="1" CornerRadius="6"
-                Padding="11,8" VerticalAlignment="Center">
-          <StackPanel>
-            <TextBlock Text="Launch status" FontWeight="SemiBold"
-                       Foreground="{StaticResource InkBrush}" FontSize="12"/>
-            <TextBlock x:Name="LaunchStatusText" TextWrapping="Wrap"
-                       Margin="0,2,0,0" Foreground="#7A4B00" FontSize="12"/>
-          </StackPanel>
-        </Border>
-        <Button x:Name="LaunchButton" Grid.Column="2" Content="Launch Selected Agent"
-                Style="{StaticResource PrimaryButtonStyle}" VerticalAlignment="Center"/>
+  <DockPanel>
+    <Border x:Name="LaunchStatusArea" DockPanel.Dock="Bottom" BorderBrush="{StaticResource Line}" BorderThickness="0,1,0,0" Padding="20,12">
+      <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <TextBlock x:Name="LaunchStatusText" TextWrapping="Wrap" VerticalAlignment="Center" Foreground="#35516E"/>
+        <Button x:Name="LaunchButton" Grid.Column="1" Content="Launch OpenCode" MinWidth="170" Background="#2563A6" Foreground="White" FontWeight="SemiBold"/>
       </Grid>
     </Border>
-
-    <ScrollViewer x:Name="MainScrollViewer" VerticalScrollBarVisibility="Auto"
-                  HorizontalScrollBarVisibility="Disabled" CanContentScroll="True">
-      <Grid Margin="24,20,24,22">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="14"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="14"/>
-      <RowDefinition Height="Auto"/>
-      <RowDefinition Height="14"/>
-      <RowDefinition Height="Auto"/>
-    </Grid.RowDefinitions>
-
-    <Grid Grid.Row="0">
-      <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="Auto"/>
-      </Grid.ColumnDefinitions>
-      <StackPanel>
-        <TextBlock Text="Nono Launchpad" FontSize="25" FontWeight="SemiBold"
-                   Foreground="{StaticResource InkBrush}"/>
-        <TextBlock Text="Securely open an AI coding agent in a WSL project."
-                   Margin="0,4,0,0" Foreground="{StaticResource MutedBrush}"/>
-      </StackPanel>
-      <Border Grid.Column="1" Background="#E7F0FA" BorderBrush="#C5D9EF"
-              BorderThickness="1" CornerRadius="12" Padding="12,5"
-              VerticalAlignment="Center">
-        <TextBlock Text="WSL" Foreground="{StaticResource BlueDarkBrush}"
-                   FontSize="11" FontWeight="SemiBold"/>
-      </Border>
-    </Grid>
-
-    <Border Grid.Row="2" Style="{StaticResource CardStyle}">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="*"/>
-          <ColumnDefinition Width="Auto"/>
-        </Grid.ColumnDefinitions>
-        <StackPanel VerticalAlignment="Center">
-          <TextBlock x:Name="CredentialHeading" Text="Credential"
-                     Style="{StaticResource SectionTitleStyle}"/>
-          <StackPanel Orientation="Horizontal" Margin="0,7,0,0">
-            <TextBlock Text="Status:" Foreground="{StaticResource MutedBrush}" Margin="0,0,6,0"/>
-            <TextBlock x:Name="CredentialStatus" FontWeight="SemiBold"/>
-          </StackPanel>
-          <TextBlock Text="Encrypted for this Windows account with DPAPI. The value is never displayed."
-                     Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,4,0,0"/>
-        </StackPanel>
-        <Button x:Name="SetKeyButton" Grid.Column="1" Content="Set / Replace Credential"
-                VerticalAlignment="Center" Margin="20,0,0,0" MinWidth="180"/>
-      </Grid>
-    </Border>
-
-    <Border Grid.Row="4" Style="{StaticResource CardStyle}">
-      <Grid>
-        <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="1.12*"/>
-          <ColumnDefinition Width="1"/>
-          <ColumnDefinition Width="26"/>
-          <ColumnDefinition Width="0.88*"/>
-        </Grid.ColumnDefinitions>
-
-        <StackPanel Grid.Column="0">
-          <TextBlock Text="Project" Style="{StaticResource SectionTitleStyle}"/>
-          <TextBlock Text="Existing project" Style="{StaticResource FieldLabelStyle}" Margin="0,11,0,5"/>
-          <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <ComboBox x:Name="ProjectCombo" Grid.Column="0"/>
-            <Button x:Name="RefreshButton" Grid.Column="2" Content="Refresh" MinWidth="82"/>
-          </Grid>
-          <TextBlock Text="Create a project" Style="{StaticResource FieldLabelStyle}" Margin="0,12,0,5"/>
-          <Grid>
-            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="8"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-            <TextBox x:Name="NewProjectText" Grid.Column="0"
-                     ToolTip="Letters, numbers, dots, underscores and hyphens; must start with a letter or number."/>
-            <Button x:Name="CreateButton" Grid.Column="2" Content="Create" MinWidth="82"/>
-          </Grid>
-        </StackPanel>
-
-        <Border Grid.Column="1" Width="1" Background="{StaticResource LineBrush}" Margin="0,2"/>
-
-        <StackPanel Grid.Column="3">
-          <TextBlock Text="Agent" Style="{StaticResource SectionTitleStyle}"/>
-          <TextBlock Text="Configured agent" Style="{StaticResource FieldLabelStyle}" Margin="0,11,0,5"/>
-          <ComboBox x:Name="AgentCombo"/>
-          <TextBlock Text="Utilities" Style="{StaticResource FieldLabelStyle}" Margin="0,16,0,7"/>
-          <StackPanel Orientation="Horizontal">
-            <Button x:Name="OpenFolderButton" Content="Open Folder" Margin="0,0,8,0"/>
-            <Button x:Name="OpenShellButton" Content="Open Shell"/>
-          </StackPanel>
-        </StackPanel>
-      </Grid>
-    </Border>
-
-    <Border Grid.Row="6" Style="{StaticResource CardStyle}">
-      <Grid>
-        <Grid.RowDefinitions>
-          <RowDefinition Height="Auto"/>
-          <RowDefinition Height="10"/>
-          <RowDefinition Height="*"/>
-          <RowDefinition Height="10"/>
-          <RowDefinition Height="Auto"/>
-        </Grid.RowDefinitions>
-        <Grid Grid.Row="0">
-          <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
-          <StackPanel>
-            <TextBlock Text="Readiness" Style="{StaticResource SectionTitleStyle}"/>
-            <TextBlock Text="Local checks for the selected WSL environment."
-                       Foreground="{StaticResource MutedBrush}" FontSize="12" Margin="0,3,0,0"/>
-          </StackPanel>
-          <Button x:Name="CheckButton" Grid.Column="1" Content="Check Again"
-                  Width="104" HorizontalAlignment="Right" VerticalAlignment="Center"/>
+    <ScrollViewer x:Name="MainScrollViewer" VerticalScrollBarVisibility="Auto">
+      <StackPanel Margin="24,20">
+        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel><TextBlock x:Name="BrandHeading" FontSize="25" FontWeight="SemiBold" Foreground="{StaticResource Ink}"/><TextBlock Text="Open OpenCode safely in an existing Windows project through Nono and WSL." Foreground="{StaticResource Muted}" Margin="0,4,0,0"/></StackPanel>
+          <Button x:Name="AboutButton" Grid.Column="1" Content="About"/>
         </Grid>
-        <TextBox x:Name="StatusText" Grid.Row="2" IsReadOnly="True"
-                 Height="145"
-                 TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"
-                 HorizontalScrollBarVisibility="Disabled" VerticalContentAlignment="Top"
-                 Background="{StaticResource FieldBrush}" BorderBrush="#D5DEE8"
-                 Padding="10" FontFamily="Consolas" FontSize="12"/>
-        <Border Grid.Row="4" Background="#EEF4FA" BorderBrush="#D4E2F0"
-                BorderThickness="1" CornerRadius="5" Padding="10,7">
-          <TextBlock Text="Readiness confirms local components only. Profile compatibility still requires strict validation and a real launch test."
-                     Foreground="#3E5872" FontSize="12" TextWrapping="Wrap"/>
-        </Border>
-      </Grid>
-    </Border>
-
-      </Grid>
+        <Border Style="{StaticResource Card}" Margin="0,16,0,0"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <StackPanel><TextBlock x:Name="CredentialHeading" FontWeight="SemiBold" FontSize="15"/><TextBlock x:Name="CredentialStatus" Margin="0,7,0,0"/><TextBlock Text="Encrypted for this Windows account with DPAPI; never displayed." Foreground="{StaticResource Muted}" Margin="0,4,0,0"/></StackPanel>
+          <Button x:Name="SetKeyButton" Grid.Column="1" VerticalAlignment="Center"/>
+        </Grid></Border>
+        <Border Style="{StaticResource Card}" Margin="0,14,0,0"><StackPanel>
+          <TextBlock Text="Project" FontWeight="SemiBold" FontSize="15"/><TextBlock Text="Choose an existing local-drive or UNC/network directory." Foreground="{StaticResource Muted}" Margin="0,4,0,10"/>
+          <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <ComboBox x:Name="ProjectCombo" IsEditable="True" IsTextSearchEnabled="False"/>
+            <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse…"/>
+            <Button x:Name="RefreshButton" Grid.Column="2" Content="Prune / Refresh"/>
+          </Grid>
+          <TextBlock x:Name="ProjectValidationText" Foreground="#B03A2E" TextWrapping="Wrap" Margin="0,6,0,0"/>
+          <TextBlock Text="Agent" FontWeight="SemiBold" Margin="0,14,0,4"/><TextBlock Text="OpenCode"/>
+          <StackPanel Orientation="Horizontal" Margin="0,12,0,0"><Button x:Name="OpenFolderButton" Content="Open Folder"/><Button x:Name="OpenShellButton" Content="Open Shell"/></StackPanel>
+        </StackPanel></Border>
+        <Border x:Name="SyncNotice" Style="{StaticResource Card}" Margin="0,14,0,0" Background="#FFF4E5" Visibility="Collapsed"><StackPanel>
+          <TextBlock Text="OpenCode configuration update available" FontWeight="SemiBold"/><TextBlock x:Name="SyncNoticeText" TextWrapping="Wrap" Margin="0,5,0,8"/>
+          <StackPanel Orientation="Horizontal"><Button x:Name="UpdateFilesButton" Content="Update"/><Button x:Name="KeepFilesButton" Content="Keep Existing"/></StackPanel>
+        </StackPanel></Border>
+        <Border Style="{StaticResource Card}" Margin="0,14,0,0"><StackPanel><TextBlock Text="Readiness" FontWeight="SemiBold" FontSize="15"/><TextBox x:Name="StatusText" IsReadOnly="True" Height="100" Margin="0,8,0,0" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" FontFamily="Consolas"/><Button x:Name="CheckButton" Content="Check Again" HorizontalAlignment="Right"/></StackPanel></Border>
+      </StackPanel>
     </ScrollViewer>
   </DockPanel>
 </Window>
 '@
-
 $reader = New-Object System.Xml.XmlNodeReader $xaml
 $window = [Windows.Markup.XamlReader]::Load($reader)
-$workArea = [System.Windows.SystemParameters]::WorkArea
-$window.MaxHeight = $workArea.Height
-$window.MaxWidth = $workArea.Width
-$window.MinHeight = [Math]::Min(420.0, $workArea.Height)
-$window.MinWidth = [Math]::Min(640.0, $workArea.Width)
-$window.Height = [Math]::Min(680.0, $workArea.Height)
-$window.Width = [Math]::Min(880.0, $workArea.Width)
-
-$names = @('CredentialHeading','CredentialStatus','SetKeyButton','RefreshButton','ProjectCombo','CreateButton','NewProjectText','AgentCombo','OpenFolderButton','OpenShellButton','CheckButton','StatusText','LaunchStatusArea','LaunchStatusBanner','LaunchStatusText','LaunchButton','MainScrollViewer')
+$window.Title = $DisplayName
+$window.MaxHeight = [System.Windows.SystemParameters]::WorkArea.Height
+$window.MaxWidth = [System.Windows.SystemParameters]::WorkArea.Width
+$BrandHeading = $window.FindName('BrandHeading'); $BrandHeading.Text = $DisplayName
+$names = @('CredentialHeading','CredentialStatus','SetKeyButton','ProjectCombo','ProjectValidationText','BrowseButton','RefreshButton','OpenFolderButton','OpenShellButton','SyncNotice','SyncNoticeText','UpdateFilesButton','KeepFilesButton','StatusText','CheckButton','LaunchStatusArea','LaunchStatusText','LaunchButton','AboutButton')
 foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($name) -Scope Script }
-
-$script:Readiness = @{ Distro = $false }
-foreach ($agentName in $Config.Agents.Keys) {
-    [void]$AgentCombo.Items.Add([string]$agentName)
-}
-$AgentCombo.SelectedItem = [string]$Config.DefaultAgent
 $CredentialHeading.Text = "Credential: $($Config.CredentialVariable)"
 $SetKeyButton.Content = "Set / Replace $($Config.CredentialVariable)"
+$script:Readiness = @{ Distro=$false }; $script:PendingChanges=@(); $script:PendingLaunchPath=$null
 
-function Show-LaunchpadError {
-    param([string]$Message)
-    [void][Windows.MessageBox]::Show($window, $Message, 'Nono Launchpad', 'OK', 'Error')
+function Show-LaunchpadError { param([string]$Message) [void][Windows.MessageBox]::Show($window, $Message, $DisplayName, 'OK', 'Error') }
+function Get-SelectedProjectPath { return [string]$ProjectCombo.Text }
+function Refresh-Projects {
+    $selected = Get-SelectedProjectPath
+    $ProjectCombo.Items.Clear()
+    foreach ($path in @(Get-ProjectHistory)) { [void]$ProjectCombo.Items.Add($path) }
+    if ($selected) { $ProjectCombo.Text = $selected } elseif ($ProjectCombo.Items.Count -gt 0) { $ProjectCombo.SelectedIndex = 0 }
+    Update-ControlState
 }
-
-function Get-SelectedProject { return [string]$ProjectCombo.SelectedItem }
-function Get-SelectedAgent {
-    if ($null -eq $AgentCombo.SelectedItem) { return $null }
-    return [string]$AgentCombo.SelectedItem
+function Test-SelectedProject {
+    try { if (-not (Get-SelectedProjectPath)) { return $false }; [void](Resolve-WindowsProjectPath (Get-SelectedProjectPath)); return $true } catch { return $false }
 }
-
 function Update-ControlState {
-    $projectOk = Test-ProjectName (Get-SelectedProject)
+    $projectOk = $false; $projectMessage = ''
+    try {
+        if (Get-SelectedProjectPath) { [void](Resolve-WindowsProjectPath (Get-SelectedProjectPath)); $projectOk = $true }
+    }
+    catch { $projectMessage = $_.Exception.Message }
+    $ProjectValidationText.Text = $projectMessage
     $keyOk = Test-CredentialConfigured
-    $agentName = Get-SelectedAgent
-    $agentConfigured = Test-AgentConfigured $agentName
-
-    # Gate only on prerequisites the GUI can verify reliably. Executable and
-    # profile validation happens in the launch terminal, which stays open on
-    # failure and is authoritative for the real interactive shell environment.
     $blockers = New-Object System.Collections.Generic.List[string]
     if (-not $keyOk) { $blockers.Add("save $($Config.CredentialVariable)") }
     if (-not $script:Readiness.Distro) { $blockers.Add("WSL distro '$($Config.Distro)' is unavailable") }
-    if (-not $agentConfigured) { $blockers.Add('select a configured agent') }
-    if (-not $projectOk) { $blockers.Add('select a project') }
-
+    if (-not $projectOk) { $blockers.Add('select an existing, permitted project directory') }
     $LaunchButton.IsEnabled = $blockers.Count -eq 0
-    $OpenFolderButton.IsEnabled = $projectOk -and $script:Readiness.Distro
+    $OpenFolderButton.IsEnabled = $projectOk
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
-    $CredentialStatus.Foreground = if ($keyOk) { '#1E8449' } else { '#B03A2E' }
-    if ($LaunchButton.IsEnabled) {
-        $LaunchStatusText.Text = "Ready to launch in $($Config.Distro) under ~/$($Config.ProjectRoot)."
-        $LaunchStatusBanner.Background = '#EAF7EF'
-        $LaunchStatusBanner.BorderBrush = '#9AC9AA'
-        $LaunchStatusText.Foreground = '#176B3A'
-        $LaunchButton.ToolTip = 'Ready to launch the selected agent.'
-    }
-    else {
-        $reasonText = @($blockers | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_) }) -join '; '
-        if ([string]::IsNullOrWhiteSpace($reasonText)) { $reasonText = 'readiness checks have not completed' }
-        $LaunchStatusText.Text = "Launch unavailable: $reasonText"
-        $LaunchStatusBanner.Background = '#FFF4E5'
-        $LaunchStatusBanner.BorderBrush = '#E5C07B'
-        $LaunchStatusText.Foreground = '#7A4B00'
-        $LaunchButton.ToolTip = $reasonText
-    }
+    $LaunchStatusText.Text = if ($LaunchButton.IsEnabled) { 'Ready to launch OpenCode.' } else { 'Launch unavailable: ' + ($blockers -join '; ') }
 }
-
-function Refresh-Projects {
-    $selected = Get-SelectedProject
-    $ProjectCombo.Items.Clear()
-    if (-not (Test-DistroRegistered)) { Update-ControlState; return }
-    try {
-        $root = $Config.ProjectRoot
-        $lines = Invoke-WslText -LinuxScript "mkdir -p -- `"`$HOME/$root`"; find `"`$HOME/$root`" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | LC_ALL=C sort"
-        foreach ($line in $lines) {
-            if (Test-ProjectName $line) { [void]$ProjectCombo.Items.Add($line) }
-        }
-        if ($selected -and $ProjectCombo.Items.Contains($selected)) { $ProjectCombo.SelectedItem = $selected }
-        elseif ($ProjectCombo.Items.Count -gt 0) { $ProjectCombo.SelectedIndex = 0 }
-    }
-    catch { Show-LaunchpadError $_.Exception.Message }
-    Update-ControlState
-}
-
 function Refresh-Readiness {
-    $script:Readiness = @{ Distro = (Test-DistroRegistered) }
-
-    $lines = New-Object System.Collections.Generic.List[string]
-    $lines.Add("Distro $($Config.Distro): " + $(if ($script:Readiness.Distro) { 'OK' } else { 'MISSING' }))
-    $lines.Add("Credential $($Config.CredentialVariable): " + $(if (Test-CredentialConfigured) { 'CONFIGURED' } else { 'NOT CONFIGURED' }))
-    $lines.Add('Agent executable and profile: validated by Launch')
-    $lines.Add('Launch errors remain visible in the agent terminal.')
-    $StatusText.Text = $lines -join [Environment]::NewLine
+    $script:Readiness.Distro = Test-DistroRegistered
+    $StatusText.Text = @("Distro $($Config.Distro): " + $(if ($script:Readiness.Distro) {'OK'} else {'MISSING'}), "Credential $($Config.CredentialVariable): " + $(if (Test-CredentialConfigured) {'CONFIGURED'} else {'NOT CONFIGURED'}), 'Agent: OpenCode only', 'Project: existing Windows local or UNC folder') -join [Environment]::NewLine
     Update-ControlState
 }
-
 function Start-HelperTerminal {
-    param(
-        [Parameter(Mandatory)][ValidateSet('Launch','Shell')][string]$HelperMode,
-        [string]$AgentName,
-        [string]$ProjectName
-    )
-    $powerShell = (Get-Command powershell.exe -ErrorAction Stop).Source
-
-    # Use EncodedCommand so arbitrary configured display names and script paths
-    # survive PowerShell 5.1 argument joining. No secret is encoded.
-    $helperCommand = '& ' + (ConvertTo-PowerShellLiteral $PSCommandPath) + ' -Mode ' + (ConvertTo-PowerShellLiteral $HelperMode)
-    if ($AgentName) { $helperCommand += ' -Agent ' + (ConvertTo-PowerShellLiteral $AgentName) }
-    if ($ProjectName) { $helperCommand += ' -Project ' + (ConvertTo-PowerShellLiteral $ProjectName) }
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($helperCommand))
-    $helperArgs = @('-NoLogo','-NoProfile','-EncodedCommand', $encoded)
-
-    $wt = Get-Command wt.exe -ErrorAction SilentlyContinue
-    if ($wt) {
-        $safeTitle = if ($HelperMode -eq 'Launch') { "Nono-Agent-$ProjectName" } else { "Nono-Shell-$ProjectName" }
-        $arguments = @('new-tab','--title', $safeTitle,'--', $powerShell) + $helperArgs
-        Start-Process -FilePath $wt.Source -ArgumentList $arguments
+    param([ValidateSet('Launch','Shell')][string]$HelperMode, [string]$Path)
+    $powershell = (Get-Command powershell.exe -ErrorAction Stop).Source
+    $command = '$Host.UI.RawUI.WindowTitle = ' + (ConvertTo-PowerShellLiteral "$DisplayName - $HelperMode") + '; & ' + (ConvertTo-PowerShellLiteral $PSCommandPath) + ' -Mode ' + (ConvertTo-PowerShellLiteral $HelperMode)
+    if ($HelperMode -eq 'Launch') { $command += " -Agent 'OpenCode'" }
+    if ($Path) { $command += ' -ProjectPath ' + (ConvertTo-PowerShellLiteral $Path) }
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    # PowerShell 5.1 Start-Process flattens ArgumentList before CreateProcess. These
+    # fixed tokens and base64 payload contain no spaces or shell metacharacters.
+    Start-Process -FilePath $powershell -ArgumentList @('-NoLogo','-NoProfile','-EncodedCommand',$encoded)
+}
+function Complete-PendingLaunch { param([ValidateSet('Update','Decline')][string]$Decision)
+    $path = $script:PendingLaunchPath
+    try {
+        $results = @(Set-OpenCodeSyncDecision -Changes $script:PendingChanges -Action $Decision)
+        $expectedStatus = if ($Decision -eq 'Update') { 'Updated' } else { 'Declined' }
+        if (@($results | Where-Object { $_.Status -ne $expectedStatus }).Count -gt 0) {
+            $LaunchStatusText.Text = 'The repository action could not be completed for every file; existing local files were preserved. Launching anyway.'
+        }
     }
-    else {
-        Start-Process -FilePath $powerShell -ArgumentList $helperArgs
+    catch {
+        $LaunchStatusText.Text = 'The repository is unavailable; existing local files were preserved. Launching anyway.'
     }
+    finally {
+        $script:PendingChanges=@(); $script:PendingLaunchPath=$null; $SyncNotice.Visibility='Collapsed'
+    }
+    if ($path) { Start-HelperTerminal -HelperMode Launch -Path $path }
 }
 
+$AboutButton.Add_Click({ [void][Windows.MessageBox]::Show($window, "$DisplayName`nVersion $DisplayVersion`nOpenCode-only WSL launcher", "About $DisplayName", 'OK', 'Information') })
 $SetKeyButton.Add_Click({
     try {
-        $dialog = New-Object Windows.Window
-        $dialog.Title = "Set $($Config.CredentialVariable)"
-        $dialog.Width = 480; $dialog.Height = 210
-        $dialog.WindowStartupLocation = 'CenterOwner'; $dialog.Owner = $window
-        $dialog.ResizeMode = 'NoResize'
-        $panel = New-Object Windows.Controls.StackPanel
-        $panel.Margin = 20
-        $label = New-Object Windows.Controls.TextBlock
-        $label.Text = "Enter the value for $($Config.CredentialVariable). It will be encrypted for your Windows account and will not be displayed again."
-        $label.TextWrapping = 'Wrap'; $label.Margin = '0,0,0,12'
-        $box = New-Object Windows.Controls.PasswordBox
-        $box.MinHeight = 30; $box.Padding = 5
-        $buttons = New-Object Windows.Controls.StackPanel
-        $buttons.Orientation = 'Horizontal'; $buttons.HorizontalAlignment = 'Right'; $buttons.Margin = '0,16,0,0'
-        $cancel = New-Object Windows.Controls.Button
-        $cancel.Content = 'Cancel'; $cancel.Padding = '14,6'; $cancel.Margin = '0,0,8,0'
-        $save = New-Object Windows.Controls.Button
-        $save.Content = 'Save'; $save.Padding = '14,6'; $save.IsDefault = $true
-        [void]$buttons.Children.Add($cancel); [void]$buttons.Children.Add($save)
-        [void]$panel.Children.Add($label); [void]$panel.Children.Add($box); [void]$panel.Children.Add($buttons)
-        $dialog.Content = $panel
-        $cancel.Add_Click({ $dialog.DialogResult = $false })
-        $save.Add_Click({
-            if ($box.SecurePassword.Length -lt 1) {
-                [void][Windows.MessageBox]::Show($dialog, 'Enter a non-empty key.', 'Nono Launchpad', 'OK', 'Warning')
-                return
-            }
-            $secureCopy = $box.SecurePassword.Copy()
-            try { Save-Credential -SecureValue $secureCopy }
-            finally { $secureCopy.Dispose() }
-            $dialog.DialogResult = $true
-        })
-        [void]$dialog.ShowDialog()
-        Refresh-Readiness
-    }
-    catch { Show-LaunchpadError $_.Exception.Message }
+        $dialog = New-Object Windows.Window; $dialog.Title = "$DisplayName — Set $($Config.CredentialVariable)"; $dialog.Width=480; $dialog.Height=210; $dialog.Owner=$window; $dialog.WindowStartupLocation='CenterOwner'; $dialog.ResizeMode='NoResize'
+        $panel=New-Object Windows.Controls.StackPanel; $panel.Margin=20
+        $label=New-Object Windows.Controls.TextBlock; $label.Text="Enter $($Config.CredentialVariable). It will be DPAPI-encrypted and never displayed."; $label.TextWrapping='Wrap'
+        $box=New-Object Windows.Controls.PasswordBox; $box.Margin='0,12,0,12'; $box.MinHeight=30
+        $save=New-Object Windows.Controls.Button; $save.Content='Save'; $save.HorizontalAlignment='Right'; $save.IsDefault=$true
+        [void]$panel.Children.Add($label); [void]$panel.Children.Add($box); [void]$panel.Children.Add($save); $dialog.Content=$panel
+        $save.Add_Click({ if ($box.SecurePassword.Length -lt 1) { return }; $copy=$box.SecurePassword.Copy(); try { Save-Credential $copy } finally { $copy.Dispose() }; $dialog.DialogResult=$true })
+        [void]$dialog.ShowDialog(); Refresh-Readiness
+    } catch { Show-LaunchpadError $_.Exception.Message }
 })
-
-$CreateButton.Add_Click({
+$BrowseButton.Add_Click({
     try {
-        $name = $NewProjectText.Text.Trim()
-        if (-not (Test-ProjectName $name)) { throw 'Use 1-64 characters: letters, numbers, dots, underscores or hyphens. Start with a letter or number.' }
-        if (-not (Test-DistroRegistered)) { throw "WSL distribution '$($Config.Distro)' is not registered." }
-        $root = $Config.ProjectRoot
-        [void](Invoke-WslText -LinuxScript "mkdir -p -- `"`$HOME/$root/$name`"")
-        $NewProjectText.Clear()
-        Refresh-Projects
-        $ProjectCombo.SelectedItem = $name
-    }
-    catch { Show-LaunchpadError $_.Exception.Message }
-})
-
-$RefreshButton.Add_Click({ Refresh-Projects })
-$CheckButton.Add_Click({ Refresh-Readiness; Refresh-Projects })
-$ProjectCombo.Add_SelectionChanged({ Update-ControlState })
-$AgentCombo.Add_SelectionChanged({ Update-ControlState })
-
-$OpenFolderButton.Add_Click({
-    try {
-        $projectName = Get-SelectedProject
-        if (-not (Test-ProjectName $projectName)) { throw 'Select a project first.' }
-        $root = $Config.ProjectRoot
-        $linuxPaths = @(Invoke-WslText -LinuxScript "printf '%s\n' `"`$HOME/$root/$projectName`"")
-        if ($linuxPaths.Count -ne 1) { throw 'WSL did not return one project path.' }
-        $linuxPath = [string]$linuxPaths[0]
-        if (-not $linuxPath.StartsWith('/') -or $linuxPath.IndexOf([char]0) -ge 0 -or $linuxPath.Contains('"')) {
-            throw 'WSL returned an invalid project path.'
+        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+        $dialog.Description = "$DisplayName — Select an existing project directory"
+        $dialog.ShowNewFolderButton = $false
+        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $canonical = Resolve-WindowsProjectPath $dialog.SelectedPath; [void](ConvertTo-WslProjectPath $canonical); [void](Add-ProjectHistory $canonical); Refresh-Projects; $ProjectCombo.Text=$canonical; Update-ControlState
         }
-        # Target the selected distro and Linux-native project explicitly. This
-        # avoids a malformed wslpath argument opening only a generic Explorer window.
-        $uncPath = "\\wsl.localhost\$($Config.Distro)" + $linuxPath.Replace('/', '\')
-        Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $uncPath)
-    }
-    catch { Show-LaunchpadError $_.Exception.Message }
+    } catch { Show-LaunchpadError $_.Exception.Message }
 })
-
-$OpenShellButton.Add_Click({
-    try { Start-HelperTerminal -HelperMode Shell -ProjectName (Get-SelectedProject) }
-    catch { Show-LaunchpadError $_.Exception.Message }
-})
-
+$RefreshButton.Add_Click({ try { Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } })
+$CheckButton.Add_Click({ Refresh-Readiness; Refresh-Projects })
+$ProjectCombo.Add_SelectionChanged({ Update-ControlState }); $ProjectCombo.Add_LostFocus({ Update-ControlState })
+$OpenFolderButton.Add_Click({ try { $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path); Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $path) } catch { Show-LaunchpadError $_.Exception.Message } })
+$OpenShellButton.Add_Click({ try { $path=$null; if (Get-SelectedProjectPath) { $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path) }; Start-HelperTerminal -HelperMode Shell -Path $path } catch { Show-LaunchpadError $_.Exception.Message } })
 $LaunchButton.Add_Click({
     try {
-        $agentName = Get-SelectedAgent
-        $projectName = Get-SelectedProject
-        if (-not $agentName -or -not (Test-ProjectName $projectName)) { throw 'Select an agent and project.' }
-        Start-HelperTerminal -HelperMode Launch -AgentName $agentName -ProjectName $projectName
-    }
-    catch { Show-LaunchpadError $_.Exception.Message }
+        $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path)
+        $probe=@(Invoke-OpenCodeSyncProbe); $changes=@($probe | Where-Object { $_.Status -eq 'Changed' })
+        if ($changes.Count -gt 0) {
+            $script:PendingChanges=$changes; $script:PendingLaunchPath=$path
+            $SyncNoticeText.Text = "Repository versions changed for: " + (($changes | ForEach-Object {$_.Label}) -join ', ') + ". Update replaces local customizations after making a timestamped backup. Keep Existing preserves local files and suppresses this version's prompt."
+            $SyncNotice.Visibility='Visible'; return
+        }
+        $offline=@($probe | Where-Object { $_.Status -eq 'Offline' })
+        if ($offline.Count -gt 0) { $LaunchStatusText.Text='Repository unavailable; existing local files are preserved. Launching offline.' }
+        Start-HelperTerminal -HelperMode Launch -Path $path
+    } catch { Show-LaunchpadError $_.Exception.Message }
 })
-
+$UpdateFilesButton.Add_Click({ Complete-PendingLaunch -Decision Update })
+$KeepFilesButton.Add_Click({ Complete-PendingLaunch -Decision Decline })
 $window.Add_ContentRendered({ Refresh-Readiness; Refresh-Projects })
 [void]$window.ShowDialog()
