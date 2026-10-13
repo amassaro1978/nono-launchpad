@@ -186,6 +186,12 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertTrue({"LaunchButton", "LaunchStatusText", "AboutButton", "OpenShellButton"} <= self.names)
         self.assertEqual(next(x for x in self.xaml.iter() if x.attrib.get(self.xname) == "LaunchButton").attrib["Content"], "Launch OpenCode")
 
+    def test_powershell_source_is_ascii_for_windows_powershell_51(self):
+        self.assertTrue(
+            SCRIPT.isascii(),
+            "Windows PowerShell 5.1 misparses UTF-8-without-BOM punctuation",
+        )
+
     def test_public_source_has_no_obvious_secret_or_private_path(self):
         combined = SCRIPT + "\n" + README
         patterns = (

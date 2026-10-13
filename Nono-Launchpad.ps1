@@ -548,7 +548,7 @@ Initialize-FinalPathApi
           <TextBlock Text="Project" FontWeight="SemiBold" FontSize="15"/><TextBlock Text="Choose an existing local-drive or UNC/network directory." Foreground="{StaticResource Muted}" Margin="0,4,0,10"/>
           <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
             <ComboBox x:Name="ProjectCombo" IsEditable="True" IsTextSearchEnabled="False"/>
-            <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse…"/>
+            <Button x:Name="BrowseButton" Grid.Column="1" Content="Browse..."/>
             <Button x:Name="RefreshButton" Grid.Column="2" Content="Prune / Refresh"/>
           </Grid>
           <TextBlock x:Name="ProjectValidationText" Foreground="#B03A2E" TextWrapping="Wrap" Margin="0,6,0,0"/>
@@ -643,7 +643,7 @@ function Complete-PendingLaunch { param([ValidateSet('Update','Decline')][string
 $AboutButton.Add_Click({ [void][Windows.MessageBox]::Show($window, "$DisplayName`nVersion $DisplayVersion`nOpenCode-only WSL launcher", "About $DisplayName", 'OK', 'Information') })
 $SetKeyButton.Add_Click({
     try {
-        $dialog = New-Object Windows.Window; $dialog.Title = "$DisplayName — Set $($Config.CredentialVariable)"; $dialog.Width=480; $dialog.Height=210; $dialog.Owner=$window; $dialog.WindowStartupLocation='CenterOwner'; $dialog.ResizeMode='NoResize'
+        $dialog = New-Object Windows.Window; $dialog.Title = "$DisplayName - Set $($Config.CredentialVariable)"; $dialog.Width=480; $dialog.Height=210; $dialog.Owner=$window; $dialog.WindowStartupLocation='CenterOwner'; $dialog.ResizeMode='NoResize'
         $panel=New-Object Windows.Controls.StackPanel; $panel.Margin=20
         $label=New-Object Windows.Controls.TextBlock; $label.Text="Enter $($Config.CredentialVariable). It will be DPAPI-encrypted and never displayed."; $label.TextWrapping='Wrap'
         $box=New-Object Windows.Controls.PasswordBox; $box.Margin='0,12,0,12'; $box.MinHeight=30
@@ -656,7 +656,7 @@ $SetKeyButton.Add_Click({
 $BrowseButton.Add_Click({
     try {
         $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dialog.Description = "$DisplayName — Select an existing project directory"
+        $dialog.Description = "$DisplayName - Select an existing project directory"
         $dialog.ShowNewFolderButton = $false
         if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
             $canonical = Resolve-WindowsProjectPath $dialog.SelectedPath; [void](ConvertTo-WslProjectPath $canonical); [void](Add-ProjectHistory $canonical); Refresh-Projects; $ProjectCombo.Text=$canonical; Update-ControlState
