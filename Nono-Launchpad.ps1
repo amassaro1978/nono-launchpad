@@ -284,37 +284,96 @@ function Resolve-WindowsProjectPath {
 function ConvertTo-WslProjectPath {
     param([Parameter(Mandatory)][string]$WindowsPath)
     if ($WindowsPath -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
-        # wslpath does not translate SMB UNC paths. Reuse a share that an
-        # administrator has already exposed to this distro with drvfs rather
-        # than trying to elevate or silently creating a persistent mount.
+        # wslpath does not translate SMB UNC paths. Reuse an existing drvfs
+        # mount or create a deterministic, non-persistent one as WSL root.
+        # `wsl.exe -u root` does not elevate the Windows process or prompt for
+        # a Linux password; Windows still enforces the current user's share
+        # credentials and permissions.
         $uncRoot = '\\' + $Matches[1] + '\' + $Matches[2]
         $relative = [string]$Matches[3]
         $encodedRoot = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($uncRoot))
-        $encodedRelative = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($relative))
-        $scriptText = @"
+        $encodedLinuxUser = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes([string]$Config.LinuxUser))
+        $mountScript = @"
 set -e
 unc_root=`$(printf %s $encodedRoot | base64 -d)
-relative=`$(printf %s $encodedRelative | base64 -d)
+linux_user=`$(printf %s $encodedLinuxUser | base64 -d)
+user_uid=`$(id -u "`$linux_user")
+user_gid=`$(id -g "`$linux_user")
+is_expected_drvfs_mount() {
+  target=`$1
+  mounted_type=`$(findmnt -rn -M "`$target" -o FSTYPE 2>/dev/null | head -n 1)
+  mounted_options=`$(findmnt -rn -M "`$target" -o OPTIONS 2>/dev/null | head -n 1)
+  mounted_source=`$(findmnt -rn -M "`$target" -o SOURCE 2>/dev/null | head -n 1)
+  mounted_source=`$(printf '%b' "`$mounted_source")
+  shopt -s nocasematch
+  [[ "`$mounted_source" == "`$unc_root" ]] || return 1
+  [[ "`$mounted_type" == drvfs ]] && return 0
+  [[ "`$mounted_type" == 9p && "`$mounted_options" == *aname=drvfs* ]] && return 0
+  return 1
+}
 mount_target=`$(findmnt -rn -S "`$unc_root" -o TARGET 2>/dev/null | head -n 1)
 if [ -z "`$mount_target" ]; then
   escaped_unc=`$(printf '%s' "`$unc_root" | sed 's/\\/\\\\/g')
   mount_target=`$(findmnt -rn -S "`$escaped_unc" -o TARGET 2>/dev/null | head -n 1)
 fi
-if [ -z "`$mount_target" ]; then
-  shopt -s nocasematch
-  while IFS=' ' read -r candidate_source candidate_target; do
-    if [[ "`$candidate_source" == "`$unc_root" || "`$candidate_source" == "`$escaped_unc" ]]; then
-      mount_target=`$(printf '%b' "`$candidate_target")
-      break
-    fi
-  done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null)
+if [ -n "`$mount_target" ]; then
+  mount_target=`$(printf '%b' "`$mount_target")
+  is_expected_drvfs_mount "`$mount_target" || mount_target=
 fi
-[ -n "`$mount_target" ] || { printf '%s\n' 'This network share is available in Windows but is not mounted in WSL. Mount the UNC share with drvfs (or select a drive-letter path that WSL can access), then try again.' >&2; exit 25; }
+if [ -z "`$mount_target" ]; then
+  mount_key=`$(printf '%s' "`$(printf '%s' "`$unc_root" | tr '[:upper:]' '[:lower:]')" | sha256sum | cut -c 1-24)
+  mount_base=/mnt/nono-launchpad
+  mount_target="`$mount_base/`$mount_key"
+  if [ -L "`$mount_base" ] || { [ -e "`$mount_base" ] && { [ ! -d "`$mount_base" ] || mountpoint -q -- "`$mount_base" || [ "`$(stat -c %u "`$mount_base")" != 0 ]; }; }; then
+    printf '%s\n' 'The automatic WSL network-mount directory is unsafe.' >&2; exit 25
+  fi
+  mkdir -p -- "`$mount_base"
+  chown root:root "`$mount_base"
+  chmod 755 "`$mount_base"
+  if [ -L "`$mount_target" ] || { [ -e "`$mount_target" ] && [ ! -d "`$mount_target" ]; }; then
+    printf '%s\n' 'The automatic WSL network-share mount target is unsafe.' >&2; exit 25
+  fi
+  mkdir -p -- "`$mount_target"
+  if mountpoint -q -- "`$mount_target"; then
+    if ! is_expected_drvfs_mount "`$mount_target"; then
+      printf '%s\n' 'The automatic WSL mount target is already occupied by a different source.' >&2; exit 25
+    fi
+  else
+    if [ "`$(stat -c %u "`$mount_target")" != 0 ] || [ -n "`$(find "`$mount_target" -mindepth 1 -maxdepth 1 -print -quit)" ]; then
+      printf '%s\n' 'The automatic WSL network-share mount target is unsafe or not empty.' >&2; exit 25
+    fi
+    chown root:root "`$mount_target"
+    chmod 755 "`$mount_target"
+    mount -t drvfs "`$unc_root" "`$mount_target" -o "uid=`$user_uid,gid=`$user_gid" || {
+      printf '%s\n' 'Windows can access this network share, but WSL could not mount it automatically. Confirm the WSL distro allows drvfs network mounts and that your Windows share credentials are still valid.' >&2
+      exit 25
+    }
+    if ! is_expected_drvfs_mount "`$mount_target"; then
+      umount -- "`$mount_target" 2>/dev/null || true
+      printf '%s\n' 'WSL mounted an unexpected source or filesystem type.' >&2; exit 25
+    fi
+  fi
+fi
 [ "`$(printf '%s' "`$mount_target" | cut -c 1)" = / ] || { printf '%s\n' 'WSL returned an invalid network-share mount target.' >&2; exit 25; }
+printf 'NONO_MOUNT:%s\n' "`$(printf '%s' "`$mount_target" | base64 | tr -d '\n')"
+"@
+        try { $mountLines = @(Invoke-WslScriptText -LinuxScript $mountScript -UseCredential:$false -LinuxUser 'root') }
+        catch { throw "The network share could not be made available inside WSL automatically: $($_.Exception.Message)" }
+        $mountResults = @($mountLines | Where-Object { ([string]$_).StartsWith('NONO_MOUNT:') })
+        if ($mountResults.Count -ne 1) { throw 'WSL did not return one valid automatic network-share mount result.' }
+        try { $mountTarget = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(([string]$mountResults[0]).Substring(11))) }
+        catch { throw 'WSL returned an invalid automatic network-share mount result.' }
+        if (-not $mountTarget.StartsWith('/')) { throw 'WSL returned an invalid automatic network-share mount path.' }
+        $encodedMountTarget = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($mountTarget))
+        $encodedRelative = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($relative))
+        $scriptText = @"
+set -e
+mount_target=`$(printf %s $encodedMountTarget | base64 -d)
+relative=`$(printf %s $encodedRelative | base64 -d)
 relative=`$(printf '%s' "`$relative" | tr '\\' '/')
 linux_path="`$mount_target"
 [ -z "`$relative" ] || linux_path="`$mount_target/`$relative"
-[ -d "`$linux_path" ] || { printf '%s\n' 'The project path is not accessible inside the existing WSL network-share mount.' >&2; exit 24; }
+[ -d "`$linux_path" ] || { printf '%s\n' 'The project path is not accessible inside the automatic WSL network-share mount.' >&2; exit 24; }
 printf '%s\n' "`$linux_path"
 "@
     }
@@ -378,11 +437,15 @@ function Add-ProjectHistory {
 }
 
 function Invoke-WslScriptText {
-    param([Parameter(Mandatory)][string]$LinuxScript, [bool]$UseCredential = $true)
+    param(
+        [Parameter(Mandatory)][string]$LinuxScript,
+        [bool]$UseCredential = $true,
+        [ValidatePattern('^[a-z_][a-z0-9_-]*[$]?$')][string]$LinuxUser = $Config.LinuxUser
+    )
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($LinuxScript))
     $bootstrap = "printf %s $encoded | base64 -d | bash"
     $runner = {
-        $output = @(& wsl.exe -d $Config.Distro -u $Config.LinuxUser -- bash -c $bootstrap 2>&1)
+        $output = @(& wsl.exe -d $Config.Distro -u $LinuxUser -- bash -c $bootstrap 2>&1)
         $exitCode = $LASTEXITCODE
         if ($exitCode -ne 0) { throw (($output | Out-String).Trim()) }
         return @(($output | ForEach-Object { ([string]$_).TrimEnd() }) | Where-Object { $_ -ne '' })

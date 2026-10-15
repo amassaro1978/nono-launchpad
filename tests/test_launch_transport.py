@@ -20,6 +20,7 @@ class LaunchTransportTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.credential = region("function Invoke-WithCredentialEnvironment {", "function Initialize-FinalPathApi {")
+        cls.path_conversion = region("function ConvertTo-WslProjectPath {", "function Save-ProjectHistory {")
         cls.transport = region("function Invoke-GeneratedLinuxScript {", "function Invoke-OpenCodeFileOperation {")
         cls.launch = region("function Invoke-AgentInCurrentConsole {", "function Open-ShellInCurrentConsole {")
         cls.shell = region("function Open-ShellInCurrentConsole {", "if ($Mode -eq 'Launch') {")
@@ -76,7 +77,8 @@ class LaunchTransportTests(unittest.TestCase):
         self.assertIn("bash @bashArguments", self.transport)
 
     def test_launch_and_shell_use_explicit_linux_user_and_shared_transport(self):
-        self.assertGreaterEqual(SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"), 4)
+        self.assertGreaterEqual(SCRIPT.count("wsl.exe -d $Config.Distro -u $Config.LinuxUser --"), 3)
+        self.assertIn("wsl.exe -d $Config.Distro -u $LinuxUser --", SCRIPT)
         self.assertIn("Invoke-GeneratedLinuxScript", self.launch)
         self.assertIn("Invoke-GeneratedLinuxScript", self.shell)
         self.assertIn("-UseAgentShell -CheckExecutionExitCode", self.launch)
@@ -116,6 +118,18 @@ class LaunchTransportTests(unittest.TestCase):
         encoded = base64.b64encode(sample.encode()).decode()
         self.assertRegex(encoded, r"^[A-Za-z0-9+/]+={0,2}$")
         self.assertEqual(base64.b64decode(encoded).decode(), sample)
+
+    def test_unc_mount_transport_preserves_spaces_and_backslashes(self):
+        unc = r"\\server\Team Share"
+        mount_path = "/mnt/nono-launchpad/a path with spaces"
+        self.assertEqual(base64.b64decode(base64.b64encode(unc.encode())).decode(), unc)
+        marker = "NONO_MOUNT:" + base64.b64encode(mount_path.encode()).decode()
+        self.assertEqual(base64.b64decode(marker.removeprefix("NONO_MOUNT:")).decode(), mount_path)
+        self.assertIn("mounted_source=`$(printf '%b'", self.path_conversion)
+        self.assertIn("findmnt -rn -M", self.path_conversion)
+        self.assertIn("-o FSTYPE", self.path_conversion)
+        self.assertIn("NONO_MOUNT:%s", self.path_conversion)
+        self.assertIn("FromBase64String", self.path_conversion)
 
     def test_helper_terminal_avoids_start_process_argument_flattening_bugs(self):
         helper = region("function Start-HelperTerminal {", "function Complete-PendingLaunch {")

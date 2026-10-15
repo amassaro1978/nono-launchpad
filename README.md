@@ -6,7 +6,7 @@
 
 - launches only `OpenCode` with the local `opencode` Nono profile and `--allow-cwd`;
 - uses the full Explorer-style picker, including its address bar and filename box, to browse to or paste an existing local-drive or UNC/network path;
-- canonicalizes the directory, confirms that it exists, converts local paths with WSL `wslpath` (or resolves an existing WSL `drvfs` mount for UNC shares), verifies that WSL can access it, then launches from that directory;
+- canonicalizes the directory, confirms that it exists, converts local paths with WSL `wslpath` (or automatically creates/reuses a non-persistent WSL `drvfs` mount for UNC shares), verifies that WSL can access it, then launches from that directory;
 - stores the 10 most recently used valid project folders, case-insensitively deduplicated, in `%LOCALAPPDATA%\NonoLaunchpad\projects.json`;
 - preserves history across launches and prunes missing, inaccessible, or newly disallowed entries whenever history is loaded or refreshed;
 - stores the configured credential with Windows DPAPI for the current user and imports it only into the launched process tree through `WSLENV`;
@@ -67,7 +67,7 @@ Before save or launch, the script:
 4. requires an existing directory;
 5. resolves the final filesystem path with `GetFinalPathNameByHandle`, covering symlink, junction, and reparse-point targets as far as Windows PowerShell 5.1 and the current account permit;
 6. checks both the lexical and final path against the sensitive-path policy;
-7. converts a drive-letter path with WSL `wslpath -a -u`, or locates a pre-existing `drvfs` mount for the UNC share, and verifies the resulting directory exists inside the configured distro.
+7. converts a drive-letter path with WSL `wslpath -a -u`, or reuses/automatically creates a non-persistent `drvfs` mount for the UNC share, and verifies the resulting directory exists for the configured Linux user.
 
 The following are rejected with a clear safety message:
 
@@ -77,7 +77,9 @@ The following are rejected with a clear safety message:
 - `C:\Program Files (x86)` and descendants;
 - `C:\ProgramData` and descendants.
 
-Relevant environment aliases such as `%SystemRoot%`, `%windir%`, `%ProgramFiles%`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, and `%ProgramData%` are included. Comparisons are case-insensitive, tolerate trailing separators, and are repeated after final-path resolution to resist dot-segment and reparse-point bypasses. UNC paths remain supported but must exist in Windows and their share must already be mounted in WSL with `drvfs`. The launchpad deliberately does not elevate or create a persistent network mount. If no matching mount exists, it explains that requirement instead of passing the raw UNC path to `wslpath` and displaying its cryptic error.
+Relevant environment aliases such as `%SystemRoot%`, `%windir%`, `%ProgramFiles%`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, and `%ProgramData%` are included. Comparisons are case-insensitive, tolerate trailing separators, and are repeated after final-path resolution to resist dot-segment and reparse-point bypasses.
+
+UNC paths require no manual drive mapping or WSL preparation. If the share is not already mounted, the launchpad asks WSL to create a deterministic mount under `/mnt/nono-launchpad/` as WSL's `root` user, then accesses the selected subdirectory as the configured Linux user. This does not elevate the Windows process, prompt for or store another credential, write `/etc/fstab`, or create a persistent mount; Windows continues to enforce the signed-in user's share credentials, and the mount disappears when the distro shuts down. Existing mounts are reused. If Windows can open the share but WSL/`drvfs` cannot mount it, the launchpad reports that platform or credential failure directly.
 
 Project history is a compact JSON array of canonical Windows path strings in newest-first order at `%LOCALAPPDATA%\NonoLaunchpad\projects.json`. It retains at most 10 valid entries. Canonically equivalent paths are deduplicated case-insensitively; selecting an existing entry moves it to the front; and stale, inaccessible, malformed, or newly disallowed entries are removed during load/refresh while older valid entries fill the available slots. Local-drive and UNC paths use the same rules.
 
