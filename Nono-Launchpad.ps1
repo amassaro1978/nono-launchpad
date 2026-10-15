@@ -257,14 +257,51 @@ function Resolve-WindowsProjectPath {
 }
 function ConvertTo-WslProjectPath {
     param([Parameter(Mandatory)][string]$WindowsPath)
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($WindowsPath))
-    $scriptText = @"
+    if ($WindowsPath -match '^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$') {
+        # wslpath does not translate SMB UNC paths. Reuse a share that an
+        # administrator has already exposed to this distro with drvfs rather
+        # than trying to elevate or silently creating a persistent mount.
+        $uncRoot = '\\' + $Matches[1] + '\' + $Matches[2]
+        $relative = [string]$Matches[3]
+        $encodedRoot = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($uncRoot))
+        $encodedRelative = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($relative))
+        $scriptText = @"
+set -e
+unc_root=`$(printf %s $encodedRoot | base64 -d)
+relative=`$(printf %s $encodedRelative | base64 -d)
+mount_target=`$(findmnt -rn -S "`$unc_root" -o TARGET 2>/dev/null | head -n 1)
+if [ -z "`$mount_target" ]; then
+  escaped_unc=`$(printf '%s' "`$unc_root" | sed 's/\\/\\\\/g')
+  mount_target=`$(findmnt -rn -S "`$escaped_unc" -o TARGET 2>/dev/null | head -n 1)
+fi
+if [ -z "`$mount_target" ]; then
+  shopt -s nocasematch
+  while IFS=' ' read -r candidate_source candidate_target; do
+    if [[ "`$candidate_source" == "`$unc_root" || "`$candidate_source" == "`$escaped_unc" ]]; then
+      mount_target=`$(printf '%b' "`$candidate_target")
+      break
+    fi
+  done < <(findmnt -rn -o SOURCE,TARGET 2>/dev/null)
+fi
+[ -n "`$mount_target" ] || { printf '%s\n' 'This network share is available in Windows but is not mounted in WSL. Mount the UNC share with drvfs (or select a drive-letter path that WSL can access), then try again.' >&2; exit 25; }
+[ "`$(printf '%s' "`$mount_target" | cut -c 1)" = / ] || { printf '%s\n' 'WSL returned an invalid network-share mount target.' >&2; exit 25; }
+relative=`$(printf '%s' "`$relative" | tr '\\' '/')
+linux_path="`$mount_target"
+[ -z "`$relative" ] || linux_path="`$mount_target/`$relative"
+[ -d "`$linux_path" ] || { printf '%s\n' 'The project path is not accessible inside the existing WSL network-share mount.' >&2; exit 24; }
+printf '%s\n' "`$linux_path"
+"@
+    }
+    else {
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($WindowsPath))
+        $scriptText = @"
 set -e
 windows_path=`$(printf %s $encoded | base64 -d)
 linux_path=`$(wslpath -a -u -- "`$windows_path")
 [ -d "`$linux_path" ] || { printf '%s\n' 'The project path is not accessible inside WSL.' >&2; exit 24; }
 printf '%s\n' "`$linux_path"
 "@
+    }
     $lines = @(Invoke-WslScriptText -LinuxScript $scriptText -UseCredential:$false)
     if ($lines.Count -ne 1 -or -not ([string]$lines[0]).StartsWith('/')) { throw 'WSL could not convert the project directory to one accessible Linux path.' }
     return [string]$lines[0]
@@ -576,9 +613,61 @@ foreach ($name in $names) { Set-Variable -Name $name -Value $window.FindName($na
 $CredentialHeading.Text = "Credential: $($Config.CredentialVariable)"
 $SetKeyButton.Content = "Set / Replace $($Config.CredentialVariable)"
 $script:Readiness = @{ Distro=$false }; $script:PendingChanges=@(); $script:PendingLaunchPath=$null
+$script:UiBusy=$false; $script:LastProjectInput=$null; $script:LastProjectCanonical=$null; $script:LastProjectError=$null
 
 function Show-LaunchpadError { param([string]$Message) [void][Windows.MessageBox]::Show($window, $Message, $DisplayName, 'OK', 'Error') }
 function Get-SelectedProjectPath { return [string]$ProjectCombo.Text }
+function Resolve-SelectedProjectCached {
+    $inputPath = Get-SelectedProjectPath
+    if ([string]::IsNullOrWhiteSpace($inputPath)) { throw 'Select an existing project directory.' }
+    if ([StringComparer]::Ordinal.Equals($inputPath, [string]$script:LastProjectInput)) {
+        if ($script:LastProjectError) { throw $script:LastProjectError }
+        return [string]$script:LastProjectCanonical
+    }
+    $script:LastProjectInput = $inputPath; $script:LastProjectCanonical = $null; $script:LastProjectError = $null
+    try { $script:LastProjectCanonical = Resolve-WindowsProjectPath $inputPath; return [string]$script:LastProjectCanonical }
+    catch { $script:LastProjectError = $_.Exception.Message; throw }
+}
+function Clear-ProjectResolutionCache {
+    $script:LastProjectInput=$null; $script:LastProjectCanonical=$null; $script:LastProjectError=$null
+}
+function Set-UiBusy {
+    param([bool]$Busy, [string]$Message)
+    $script:UiBusy = $Busy
+    $window.Cursor = if ($Busy) { [Windows.Input.Cursors]::Wait } else { $null }
+    foreach ($control in @($SetKeyButton,$BrowseButton,$RefreshButton,$CheckButton,$OpenFolderButton,$OpenShellButton,$LaunchButton,$UpdateFilesButton,$KeepFilesButton,$ProjectCombo)) {
+        if ($null -ne $control) { $control.IsEnabled = -not $Busy }
+    }
+    if ($Busy -and $Message) { $LaunchStatusText.Text = $Message }
+    # Synchronous filesystem, DPAPI, and WSL calls can take a few seconds on
+    # first use. Paint the busy state before entering them so the UI never
+    # appears to ignore the click.
+    [void]$window.Dispatcher.Invoke([Action]{ $null = $window.Title }, [Windows.Threading.DispatcherPriority]::Render)
+    if (-not $Busy) { Update-ControlState }
+}
+function Select-ProjectDirectory {
+    # FolderBrowserDialog is a tree-only picker and has no usable address box.
+    # OpenFileDialog provides the full Explorer surface (address bar, Network,
+    # and a filename box where a UNC path can be pasted). The sentinel turns it
+    # into a folder picker while retaining Windows PowerShell 5.1 compatibility.
+    $sentinel = 'Select this folder'
+    $dialog = New-Object System.Windows.Forms.OpenFileDialog
+    $dialog.Title = "$DisplayName - Select an existing project directory"
+    $dialog.Filter = 'Folders|*.folder'
+    $dialog.FileName = $sentinel
+    $dialog.CheckFileExists = $false; $dialog.CheckPathExists = $true
+    $dialog.ValidateNames = $false; $dialog.AddExtension = $false
+    $dialog.DereferenceLinks = $true; $dialog.RestoreDirectory = $true; $dialog.AutoUpgradeEnabled = $true
+    $current = Get-SelectedProjectPath
+    if ($current -and (Test-Path -LiteralPath $current -PathType Container)) { $dialog.InitialDirectory = $current }
+    try {
+        if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+        $chosen = [string]$dialog.FileName
+        if ([IO.Path]::GetFileName($chosen) -eq $sentinel) { $chosen = [IO.Path]::GetDirectoryName($chosen) }
+        return $chosen
+    }
+    finally { $dialog.Dispose() }
+}
 function Refresh-Projects {
     $selected = Get-SelectedProjectPath
     $ProjectCombo.Items.Clear()
@@ -592,7 +681,7 @@ function Test-SelectedProject {
 function Update-ControlState {
     $projectOk = $false; $projectMessage = ''
     try {
-        if (Get-SelectedProjectPath) { [void](Resolve-WindowsProjectPath (Get-SelectedProjectPath)); $projectOk = $true }
+        if (Get-SelectedProjectPath) { [void](Resolve-SelectedProjectCached); $projectOk = $true }
     }
     catch { $projectMessage = $_.Exception.Message }
     $ProjectValidationText.Text = $projectMessage
@@ -601,8 +690,9 @@ function Update-ControlState {
     if (-not $keyOk) { $blockers.Add("save $($Config.CredentialVariable)") }
     if (-not $script:Readiness.Distro) { $blockers.Add("WSL distro '$($Config.Distro)' is unavailable") }
     if (-not $projectOk) { $blockers.Add('select an existing, permitted project directory') }
-    $LaunchButton.IsEnabled = $blockers.Count -eq 0
-    $OpenFolderButton.IsEnabled = $projectOk
+    $LaunchButton.IsEnabled = (-not $script:UiBusy) -and $blockers.Count -eq 0
+    $OpenFolderButton.IsEnabled = (-not $script:UiBusy) -and $projectOk
+    $OpenShellButton.IsEnabled = -not $script:UiBusy
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
     $LaunchStatusText.Text = if ($LaunchButton.IsEnabled) { 'Ready to launch OpenCode.' } else { 'Launch unavailable: ' + ($blockers -join '; ') }
 }
@@ -625,6 +715,8 @@ function Start-HelperTerminal {
 function Complete-PendingLaunch { param([ValidateSet('Update','Decline')][string]$Decision)
     $path = $script:PendingLaunchPath
     try {
+        $busyMessage = if ($Decision -eq 'Update') { 'Updating OpenCode files...' } else { 'Keeping existing OpenCode files...' }
+        Set-UiBusy $true $busyMessage
         $results = @(Set-OpenCodeSyncDecision -Changes $script:PendingChanges -Action $Decision)
         $expectedStatus = if ($Decision -eq 'Update') { 'Updated' } else { 'Declined' }
         if (@($results | Where-Object { $_.Status -ne $expectedStatus }).Count -gt 0) {
@@ -636,6 +728,7 @@ function Complete-PendingLaunch { param([ValidateSet('Update','Decline')][string
     }
     finally {
         $script:PendingChanges=@(); $script:PendingLaunchPath=$null; $SyncNotice.Visibility='Collapsed'
+        Set-UiBusy $false
     }
     if ($path) { Start-HelperTerminal -HelperMode Launch -Path $path }
 }
@@ -649,28 +742,42 @@ $SetKeyButton.Add_Click({
         $box=New-Object Windows.Controls.PasswordBox; $box.Margin='0,12,0,12'; $box.MinHeight=30
         $save=New-Object Windows.Controls.Button; $save.Content='Save'; $save.HorizontalAlignment='Right'; $save.IsDefault=$true
         [void]$panel.Children.Add($label); [void]$panel.Children.Add($box); [void]$panel.Children.Add($save); $dialog.Content=$panel
-        $save.Add_Click({ if ($box.SecurePassword.Length -lt 1) { return }; $copy=$box.SecurePassword.Copy(); try { Save-Credential $copy } finally { $copy.Dispose() }; $dialog.DialogResult=$true })
-        [void]$dialog.ShowDialog(); Refresh-Readiness
+        $save.Add_Click({
+            if ($box.SecurePassword.Length -lt 1) { return }
+            $save.IsEnabled=$false; $label.Text="Saving $($Config.CredentialVariable) securely..."; $dialog.Cursor=[Windows.Input.Cursors]::Wait
+            [void]$dialog.Dispatcher.Invoke([Action]{ $null=$dialog.Title }, [Windows.Threading.DispatcherPriority]::Render)
+            $copy=$null
+            $copy=$box.SecurePassword.Copy()
+            try { Save-Credential $copy; $dialog.DialogResult=$true }
+            catch { $save.IsEnabled=$true; $dialog.Cursor=$null; $label.Text=$_.Exception.Message }
+            finally { if ($null -ne $copy) { $copy.Dispose() } }
+        })
+        $saved = $dialog.ShowDialog()
+        if ($saved) { Set-UiBusy $true 'Credential saved. Refreshing readiness...'; Refresh-Readiness }
     } catch { Show-LaunchpadError $_.Exception.Message }
+    finally { Set-UiBusy $false }
 })
 $BrowseButton.Add_Click({
     try {
-        $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-        $dialog.Description = "$DisplayName - Select an existing project directory"
-        $dialog.ShowNewFolderButton = $false
-        if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-            $canonical = Resolve-WindowsProjectPath $dialog.SelectedPath; [void](ConvertTo-WslProjectPath $canonical); [void](Add-ProjectHistory $canonical); Refresh-Projects; $ProjectCombo.Text=$canonical; Update-ControlState
+        $selected = Select-ProjectDirectory
+        if ($selected) {
+            Set-UiBusy $true 'Checking the selected folder and WSL access...'
+            $canonical = Resolve-WindowsProjectPath $selected
+            $ProjectCombo.Text=$canonical; $script:LastProjectInput=$canonical; $script:LastProjectCanonical=$canonical; $script:LastProjectError=$null
+            [void](ConvertTo-WslProjectPath $canonical); [void](Add-ProjectHistory $canonical); Refresh-Projects
         }
     } catch { Show-LaunchpadError $_.Exception.Message }
+    finally { Set-UiBusy $false }
 })
-$RefreshButton.Add_Click({ try { Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } })
-$CheckButton.Add_Click({ Refresh-Readiness; Refresh-Projects })
+$RefreshButton.Add_Click({ try { Set-UiBusy $true 'Pruning and refreshing saved projects...'; Clear-ProjectResolutionCache; Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
+$CheckButton.Add_Click({ try { Set-UiBusy $true 'Checking WSL and saved settings...'; Clear-ProjectResolutionCache; Refresh-Readiness; Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $ProjectCombo.Add_SelectionChanged({ Update-ControlState }); $ProjectCombo.Add_LostFocus({ Update-ControlState })
-$OpenFolderButton.Add_Click({ try { $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path); Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $path) } catch { Show-LaunchpadError $_.Exception.Message } })
-$OpenShellButton.Add_Click({ try { $path=$null; if (Get-SelectedProjectPath) { $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path) }; Start-HelperTerminal -HelperMode Shell -Path $path } catch { Show-LaunchpadError $_.Exception.Message } })
+$OpenFolderButton.Add_Click({ try { Clear-ProjectResolutionCache; $path=Resolve-SelectedProjectCached; Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $path) } catch { Show-LaunchpadError $_.Exception.Message } })
+$OpenShellButton.Add_Click({ try { Set-UiBusy $true 'Checking the project and opening WSL...'; Clear-ProjectResolutionCache; $path=$null; if (Get-SelectedProjectPath) { $path=Resolve-SelectedProjectCached; [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path) }; Start-HelperTerminal -HelperMode Shell -Path $path } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $LaunchButton.Add_Click({
     try {
-        $path=Resolve-WindowsProjectPath (Get-SelectedProjectPath); [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path)
+        Set-UiBusy $true 'Checking the project and repository before launch...'
+        Clear-ProjectResolutionCache; $path=Resolve-SelectedProjectCached; [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path)
         $probe=@(Invoke-OpenCodeSyncProbe); $changes=@($probe | Where-Object { $_.Status -eq 'Changed' })
         if ($changes.Count -gt 0) {
             $script:PendingChanges=$changes; $script:PendingLaunchPath=$path
@@ -681,8 +788,13 @@ $LaunchButton.Add_Click({
         if ($offline.Count -gt 0) { $LaunchStatusText.Text='Repository unavailable; existing local files are preserved. Launching offline.' }
         Start-HelperTerminal -HelperMode Launch -Path $path
     } catch { Show-LaunchpadError $_.Exception.Message }
+    finally { Set-UiBusy $false }
 })
 $UpdateFilesButton.Add_Click({ Complete-PendingLaunch -Decision Update })
 $KeepFilesButton.Add_Click({ Complete-PendingLaunch -Decision Decline })
-$window.Add_ContentRendered({ Refresh-Readiness; Refresh-Projects })
+$window.Add_ContentRendered({
+    try { Set-UiBusy $true 'Checking WSL and loading saved projects...'; Clear-ProjectResolutionCache; Refresh-Readiness; Refresh-Projects }
+    catch { Show-LaunchpadError $_.Exception.Message }
+    finally { Set-UiBusy $false }
+})
 [void]$window.ShowDialog()

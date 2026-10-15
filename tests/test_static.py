@@ -70,7 +70,7 @@ class LaunchpadStaticTests(unittest.TestCase):
             "$DisplayName shell failed",
             '"About $DisplayName"',
             '"$DisplayName - $HelperMode"',
-            "$dialog.Description = \"$DisplayName",
+            "$dialog.Title = \"$DisplayName",
         ):
             self.assertIn(marker, SCRIPT)
         self.assertIn("Version $DisplayVersion", SCRIPT)
@@ -80,7 +80,10 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertTrue({"ProjectCombo", "ProjectValidationText", "BrowseButton", "RefreshButton"} <= self.names)
         combo = next(x for x in self.xaml.iter() if x.attrib.get(self.xname) == "ProjectCombo")
         self.assertEqual(combo.attrib.get("IsEditable"), "True")
-        self.assertIn("System.Windows.Forms.FolderBrowserDialog", SCRIPT)
+        self.assertIn("System.Windows.Forms.OpenFileDialog", SCRIPT)
+        self.assertIn("$dialog.ValidateNames = $false", SCRIPT)
+        self.assertIn("$dialog.CheckFileExists = $false", SCRIPT)
+        self.assertNotIn("System.Windows.Forms.FolderBrowserDialog", SCRIPT)
         self.assertIn("ProjectHistoryFile = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\\projects.json'", SCRIPT)
         self.assertEqual(SCRIPT.count("$ProjectHistoryLimit = 10"), 1)
         self.assertIn("System.Collections.Generic.HashSet[string]", SCRIPT)
@@ -104,6 +107,10 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertRegex(resolver, r"A-Za-z\]:\[\\\\/\].*\\\\\\\\")
         converter = region("function ConvertTo-WslProjectPath {", "function Save-ProjectHistory {")
         self.assertIn("wslpath -a -u --", converter)
+        self.assertIn("findmnt -rn -S", converter)
+        self.assertIn("escaped_unc=", converter)
+        self.assertIn("shopt -s nocasematch", converter)
+        self.assertIn("not mounted in WSL", converter)
         self.assertIn('[ -d "`$linux_path" ]', converter)
         self.assertIn("[Convert]::ToBase64String", converter)
         launch = region("function Invoke-AgentInCurrentConsole {", "function Open-ShellInCurrentConsole {")
@@ -185,6 +192,31 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertEqual(list(dock)[1].tag, f"{self.wpf}ScrollViewer")
         self.assertTrue({"LaunchButton", "LaunchStatusText", "AboutButton", "OpenShellButton"} <= self.names)
         self.assertEqual(next(x for x in self.xaml.iter() if x.attrib.get(self.xname) == "LaunchButton").attrib["Content"], "Launch OpenCode")
+
+    def test_slow_first_use_operations_render_a_busy_state(self):
+        busy = region("function Set-UiBusy {", "function Select-ProjectDirectory {")
+        self.assertIn("Dispatcher.Invoke", busy)
+        self.assertIn("DispatcherPriority]::Render", busy)
+        self.assertIn("[Windows.Input.Cursors]::Wait", busy)
+        for message in (
+            "Checking the selected folder and WSL access...",
+            "Saving $($Config.CredentialVariable) securely...",
+            "Credential saved. Refreshing readiness...",
+            "Checking the project and repository before launch...",
+        ):
+            self.assertIn(message, SCRIPT)
+        self.assertIn("$script:UiBusy", SCRIPT)
+        self.assertIn("function Clear-ProjectResolutionCache", SCRIPT)
+        for action in ("$RefreshButton.Add_Click", "$CheckButton.Add_Click", "$OpenFolderButton.Add_Click", "$OpenShellButton.Add_Click"):
+            handler = SCRIPT[SCRIPT.index(action) : SCRIPT.index("})", SCRIPT.index(action)) + 2]
+            self.assertIn("Clear-ProjectResolutionCache", handler)
+        pending = region("function Complete-PendingLaunch", "$AboutButton.Add_Click")
+        self.assertIn("Set-UiBusy $true", pending)
+        self.assertIn("Set-UiBusy $false", pending)
+        rendered = SCRIPT[SCRIPT.index("$window.Add_ContentRendered") :]
+        self.assertIn("Set-UiBusy $true", rendered)
+        self.assertIn("finally { Set-UiBusy $false }", rendered)
+        self.assertIn("if ($null -ne $copy) { $copy.Dispose() }", SCRIPT)
 
     def test_powershell_source_is_ascii_for_windows_powershell_51(self):
         self.assertTrue(

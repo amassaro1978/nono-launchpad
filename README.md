@@ -5,8 +5,8 @@
 ## What it does
 
 - launches only `OpenCode` with the local `opencode` Nono profile and `--allow-cwd`;
-- browses to an existing Windows project directory on a local drive or UNC/network share;
-- canonicalizes the directory, confirms that it exists, converts it with WSL `wslpath`, verifies that WSL can access it, then launches from that directory;
+- uses the full Explorer-style picker, including its address bar and filename box, to browse to or paste an existing local-drive or UNC/network path;
+- canonicalizes the directory, confirms that it exists, converts local paths with WSL `wslpath` (or resolves an existing WSL `drvfs` mount for UNC shares), verifies that WSL can access it, then launches from that directory;
 - stores the 10 most recently used valid project folders, case-insensitively deduplicated, in `%LOCALAPPDATA%\NonoLaunchpad\projects.json`;
 - preserves history across launches and prunes missing, inaccessible, or newly disallowed entries whenever history is loaded or refreshed;
 - stores the configured credential with Windows DPAPI for the current user and imports it only into the launched process tree through `WSLENV`;
@@ -55,6 +55,8 @@ Arguments are represented as separate array elements and shell-quoted individual
 
 Choose **Browse…** and select an existing Windows directory. The editable project dropdown also allows a previously used local or UNC path to be selected. A path is saved only after it passes Windows canonicalization and WSL accessibility checks.
 
+The Browse button uses the standard Explorer-style file dialog rather than the legacy tree-only folder dialog. Navigate into the desired folder and choose **Open**, or paste a complete path such as `\\server\share\project` into the filename box. The temporary `Select this folder` filename is only a folder-selection marker and is never created.
+
 Before save or launch, the script:
 
 1. expands Windows environment variables;
@@ -63,7 +65,7 @@ Before save or launch, the script:
 4. requires an existing directory;
 5. resolves the final filesystem path with `GetFinalPathNameByHandle`, covering symlink, junction, and reparse-point targets as far as Windows PowerShell 5.1 and the current account permit;
 6. checks both the lexical and final path against the sensitive-path policy;
-7. converts it with WSL `wslpath -a -u` and verifies the resulting directory exists inside the configured distro.
+7. converts a drive-letter path with WSL `wslpath -a -u`, or locates a pre-existing `drvfs` mount for the UNC share, and verifies the resulting directory exists inside the configured distro.
 
 The following are rejected with a clear safety message:
 
@@ -73,11 +75,11 @@ The following are rejected with a clear safety message:
 - `C:\Program Files (x86)` and descendants;
 - `C:\ProgramData` and descendants.
 
-Relevant environment aliases such as `%SystemRoot%`, `%windir%`, `%ProgramFiles%`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, and `%ProgramData%` are included. Comparisons are case-insensitive, tolerate trailing separators, and are repeated after final-path resolution to resist dot-segment and reparse-point bypasses. UNC paths remain supported but must exist and be accessible from both Windows and WSL.
+Relevant environment aliases such as `%SystemRoot%`, `%windir%`, `%ProgramFiles%`, `%ProgramW6432%`, `%ProgramFiles(x86)%`, and `%ProgramData%` are included. Comparisons are case-insensitive, tolerate trailing separators, and are repeated after final-path resolution to resist dot-segment and reparse-point bypasses. UNC paths remain supported but must exist in Windows and their share must already be mounted in WSL with `drvfs`. The launchpad deliberately does not elevate or create a persistent network mount. If no matching mount exists, it explains that requirement instead of passing the raw UNC path to `wslpath` and displaying its cryptic error.
 
 Project history is a compact JSON array of canonical Windows path strings in newest-first order at `%LOCALAPPDATA%\NonoLaunchpad\projects.json`. It retains at most 10 valid entries. Canonically equivalent paths are deduplicated case-insensitively; selecting an existing entry moves it to the front; and stale, inaccessible, malformed, or newly disallowed entries are removed during load/refresh while older valid entries fill the available slots. Local-drive and UNC paths use the same rules.
 
-History is persisted after a project passes Windows canonicalization and WSL accessibility checks when it is chosen through **Browse**, **Launch OpenCode**, **Open Folder**, or **Open Shell**. Loading or refreshing also persists any pruning or cap migration. Writes serialize the complete array to a uniquely named sibling temporary file and then replace `projects.json`, so an interrupted serialization cannot leave a partially written history file. Invalid JSON is treated as an empty history and repaired through the same replacement path.
+History is persisted after a project passes Windows canonicalization and WSL accessibility checks when it is chosen through **Browse**, **Launch OpenCode**, or **Open Shell**. **Open Folder** only opens the already validated Windows path and does not start WSL. Loading or refreshing also persists any pruning or cap migration. Writes serialize the complete array to a uniquely named sibling temporary file and then replace `projects.json`, so an interrupted serialization cannot leave a partially written history file. Invalid JSON is treated as an empty history and repaired through the same replacement path.
 
 ## Safe OpenCode file synchronization
 
@@ -119,6 +121,8 @@ powershell.exe -NoProfile -STA -File .\Nono-Launchpad.ps1
 5. If repository files changed, choose **Update** or **Keep Existing** in the launcher.
 
 **Open Folder** opens the selected Windows directory. **Open Shell** opens a credentialed WSL login shell in the selected project (or the WSL home directory when no project is selected).
+
+Folder validation, first WSL startup, DPAPI storage, and repository checks can take several seconds on first use. During those synchronous checks the launchpad immediately displays the current operation, switches to a wait cursor, disables duplicate actions, and forces the busy state to render before work begins. Repeated project-state refreshes reuse the last validation result while the selected text is unchanged.
 
 ## Verification
 
