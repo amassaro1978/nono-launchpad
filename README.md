@@ -57,6 +57,8 @@ Choose **Browse…** and select an existing Windows directory. The editable proj
 
 The Browse button uses the standard Explorer-style file dialog rather than the legacy tree-only folder dialog. Navigate into the desired folder and choose **Open**, or paste a complete path such as `\\server\share\project` into the filename box. The temporary `Select this folder` filename is only a folder-selection marker and is never created.
 
+Explorer sometimes returns that temporary marker with a filter suffix after navigating to a UNC share. The launchpad removes only that known marker before validation. Typing or leaving the project field no longer performs a network filesystem call; full existence and safety validation starts only after an explicit Browse, Launch, Open Folder, or Open Shell action, when progress is visible. Network path validation times out with a clear error instead of leaving the GUI waiting indefinitely.
+
 Before save or launch, the script:
 
 1. expands Windows environment variables;

@@ -32,6 +32,7 @@ $Config = @{
     ProjectHistoryFile = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\projects.json'
     CurlConnectTimeoutSeconds = 10
     CurlMaxTimeSeconds = 60
+    ProjectPathTimeoutSeconds = 15
     RemoteFiles       = [ordered]@{
         'OpenCode nono profile' = @{
             Url = ''
@@ -62,7 +63,7 @@ function Assert-Configuration {
     if ($Config.Agents.Count -ne 1 -or -not $Config.Agents.Contains('OpenCode') -or $Config.DefaultAgent -ne 'OpenCode') {
         throw 'This release must contain only the OpenCode agent.'
     }
-    foreach ($timeoutName in @('CurlConnectTimeoutSeconds','CurlMaxTimeSeconds')) {
+    foreach ($timeoutName in @('CurlConnectTimeoutSeconds','CurlMaxTimeSeconds','ProjectPathTimeoutSeconds')) {
         if ($Config[$timeoutName] -isnot [int] -or $Config[$timeoutName] -lt 1) { throw "$timeoutName must be a positive integer." }
     }
     if ($Config.CurlMaxTimeSeconds -lt $Config.CurlConnectTimeoutSeconds) { throw 'CurlMaxTimeSeconds cannot be shorter than CurlConnectTimeoutSeconds.' }
@@ -180,14 +181,19 @@ function Initialize-FinalPathApi {
 using System;
 using System.Text;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
 namespace NonoLaunchpad {
   public static class NativePath {
+    static readonly object PathTaskLock = new object();
+    static Task<string> activePathTask;
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     static extern uint GetFinalPathNameByHandle(SafeFileHandle file, StringBuilder path, uint length, uint flags);
-    public static string GetFinalDirectoryPath(string path) {
+    static string GetFinalDirectoryPathCore(string path) {
+      if ((System.IO.File.GetAttributes(path) & System.IO.FileAttributes.Directory) == 0)
+        throw new System.IO.IOException("The selected path is not a directory.");
       using (SafeFileHandle handle = CreateFile(path, 0, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero)) {
         if (handle.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
         StringBuilder buffer = new StringBuilder(32768);
@@ -198,6 +204,23 @@ namespace NonoLaunchpad {
         if (value.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase)) return value.Substring(4);
         return value;
       }
+    }
+    public static string GetFinalDirectoryPath(string path, int timeoutMilliseconds) {
+      Task<string> task;
+      lock (PathTaskLock) {
+        if (activePathTask != null && !activePathTask.IsCompleted) {
+          throw new InvalidOperationException("A previous network directory check is still finishing. Wait a moment, then try again.");
+        } else {
+          task = activePathTask = Task.Run(() => GetFinalDirectoryPathCore(path));
+        }
+      }
+      System.Threading.WaitHandle waitHandle = ((IAsyncResult)task).AsyncWaitHandle;
+      if (!waitHandle.WaitOne(timeoutMilliseconds)) {
+        task.ContinueWith(delegate { waitHandle.Dispose(); });
+        throw new TimeoutException("Timed out while checking the project directory. Confirm that the network share is online and accessible, then try again.");
+      }
+      waitHandle.Dispose();
+      return task.GetAwaiter().GetResult();
     }
   }
 }
@@ -235,10 +258,13 @@ function Resolve-WindowsProjectPath {
     }
     try { $lexical = [IO.Path]::GetFullPath($expanded.Replace('/', '\')) }
     catch { throw 'The project path is not a valid Windows path.' }
-    if (-not (Test-Path -LiteralPath $lexical -PathType Container)) { throw 'The selected project directory does not exist or is not accessible.' }
     Initialize-FinalPathApi
-    try { $final = [NonoLaunchpad.NativePath]::GetFinalDirectoryPath($lexical).TrimEnd('\') }
-    catch { throw "The selected project directory could not be canonicalized: $($_.Exception.Message)" }
+    try { $final = [NonoLaunchpad.NativePath]::GetFinalDirectoryPath($lexical, ([int]$Config.ProjectPathTimeoutSeconds * 1000)).TrimEnd('\') }
+    catch {
+        $detail = $_.Exception.Message
+        if ($_.Exception.InnerException) { $detail = $_.Exception.InnerException.Message }
+        throw "The selected project directory does not exist, is not accessible, or could not be canonicalized: $detail"
+    }
     if ($final -match '^[A-Za-z]:$') { $final += '\' }
     foreach ($candidate in @($lexical, $final)) {
         foreach ($root in Get-SensitiveWindowsRoots) {
@@ -631,6 +657,17 @@ function Resolve-SelectedProjectCached {
 function Clear-ProjectResolutionCache {
     $script:LastProjectInput=$null; $script:LastProjectCanonical=$null; $script:LastProjectError=$null
 }
+function Get-ProjectInputError {
+    param([AllowNull()][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return 'Select an existing project directory.' }
+    if ($Path.IndexOf([char]0) -ge 0 -or $Path -match '[\x00-\x1F]') { return 'Select a valid Windows project directory.' }
+    $expanded = [Environment]::ExpandEnvironmentVariables($Path.Trim().Trim('"'))
+    if ($expanded.StartsWith('\\?\') -or $expanded.StartsWith('\\.\')) { return 'Extended-device and device namespace paths are not accepted as project paths.' }
+    if ($expanded -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\/]+[\\/][^\\/]+)') { return 'Project path must be an absolute local-drive or UNC/network path.' }
+    try { [void][IO.Path]::GetFullPath($expanded.Replace('/', '\')) }
+    catch { return 'The project path is not a valid Windows path.' }
+    return ''
+}
 function Set-UiBusy {
     param([bool]$Busy, [string]$Message)
     $script:UiBusy = $Busy
@@ -653,20 +690,34 @@ function Select-ProjectDirectory {
     $sentinel = 'Select this folder'
     $dialog = New-Object System.Windows.Forms.OpenFileDialog
     $dialog.Title = "$DisplayName - Select an existing project directory"
-    $dialog.Filter = 'Folders|*.folder'
+    $dialog.Filter = 'All items|*.*'
     $dialog.FileName = $sentinel
     $dialog.CheckFileExists = $false; $dialog.CheckPathExists = $true
     $dialog.ValidateNames = $false; $dialog.AddExtension = $false
     $dialog.DereferenceLinks = $true; $dialog.RestoreDirectory = $true; $dialog.AutoUpgradeEnabled = $true
     $current = Get-SelectedProjectPath
-    if ($current -and (Test-Path -LiteralPath $current -PathType Container)) { $dialog.InitialDirectory = $current }
+    if ($current -match '^[A-Za-z]:[\\/]' -and (Test-Path -LiteralPath $current -PathType Container)) { $dialog.InitialDirectory = $current }
     try {
         if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-        $chosen = [string]$dialog.FileName
-        if ([IO.Path]::GetFileName($chosen) -eq $sentinel) { $chosen = [IO.Path]::GetDirectoryName($chosen) }
+        $chosen = ([string]$dialog.FileName).Trim().Trim('"')
         return $chosen
     }
     finally { $dialog.Dispose() }
+}
+function Resolve-ProjectDialogPath {
+    param([Parameter(Mandatory)][string]$Path)
+    # First accept an actual directory even if its name matches the marker.
+    # Only reinterpret the marker after normal validation proves that the raw
+    # dialog result is not a directory.
+    try { return Resolve-WindowsProjectPath $Path }
+    catch {
+        $originalError = $_
+        $leaf = [IO.Path]::GetFileName($Path)
+        if ($leaf -notmatch '^Select this folder(?:\.folder)?\.?$') { throw $originalError }
+        $parent = [IO.Path]::GetDirectoryName($Path)
+        if ([string]::IsNullOrWhiteSpace($parent)) { throw $originalError }
+        return Resolve-WindowsProjectPath $parent
+    }
 }
 function Refresh-Projects {
     $selected = Get-SelectedProjectPath
@@ -679,11 +730,12 @@ function Test-SelectedProject {
     try { if (-not (Get-SelectedProjectPath)) { return $false }; [void](Resolve-WindowsProjectPath (Get-SelectedProjectPath)); return $true } catch { return $false }
 }
 function Update-ControlState {
-    $projectOk = $false; $projectMessage = ''
-    try {
-        if (Get-SelectedProjectPath) { [void](Resolve-SelectedProjectCached); $projectOk = $true }
-    }
-    catch { $projectMessage = $_.Exception.Message }
+    # Keep focus changes non-blocking. In particular, never contact a UNC share
+    # from LostFocus: that event runs before the Launch click and previously made
+    # the window look hung before its busy message could render. The actual click
+    # performs the full existence, canonicalization, policy, and WSL checks.
+    $projectMessage = Get-ProjectInputError (Get-SelectedProjectPath)
+    $projectOk = [string]::IsNullOrEmpty($projectMessage)
     $ProjectValidationText.Text = $projectMessage
     $keyOk = Test-CredentialConfigured
     $blockers = New-Object System.Collections.Generic.List[string]
@@ -694,7 +746,7 @@ function Update-ControlState {
     $OpenFolderButton.IsEnabled = (-not $script:UiBusy) -and $projectOk
     $OpenShellButton.IsEnabled = -not $script:UiBusy
     $CredentialStatus.Text = if ($keyOk) { 'Configured' } else { 'Not configured' }
-    $LaunchStatusText.Text = if ($LaunchButton.IsEnabled) { 'Ready to launch OpenCode.' } else { 'Launch unavailable: ' + ($blockers -join '; ') }
+    $LaunchStatusText.Text = if ($LaunchButton.IsEnabled) { 'Ready to validate the project and launch OpenCode.' } else { 'Launch unavailable: ' + ($blockers -join '; ') }
 }
 function Refresh-Readiness {
     $script:Readiness.Distro = Test-DistroRegistered
@@ -762,7 +814,7 @@ $BrowseButton.Add_Click({
         $selected = Select-ProjectDirectory
         if ($selected) {
             Set-UiBusy $true 'Checking the selected folder and WSL access...'
-            $canonical = Resolve-WindowsProjectPath $selected
+            $canonical = Resolve-ProjectDialogPath $selected
             $ProjectCombo.Text=$canonical; $script:LastProjectInput=$canonical; $script:LastProjectCanonical=$canonical; $script:LastProjectError=$null
             [void](ConvertTo-WslProjectPath $canonical); [void](Add-ProjectHistory $canonical); Refresh-Projects
         }
@@ -772,7 +824,8 @@ $BrowseButton.Add_Click({
 $RefreshButton.Add_Click({ try { Set-UiBusy $true 'Pruning and refreshing saved projects...'; Clear-ProjectResolutionCache; Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $CheckButton.Add_Click({ try { Set-UiBusy $true 'Checking WSL and saved settings...'; Clear-ProjectResolutionCache; Refresh-Readiness; Refresh-Projects } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $ProjectCombo.Add_SelectionChanged({ Update-ControlState }); $ProjectCombo.Add_LostFocus({ Update-ControlState })
-$OpenFolderButton.Add_Click({ try { Clear-ProjectResolutionCache; $path=Resolve-SelectedProjectCached; Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $path) } catch { Show-LaunchpadError $_.Exception.Message } })
+$ProjectCombo.AddHandler([Windows.Controls.Primitives.TextBoxBase]::TextChangedEvent, [Windows.Controls.TextChangedEventHandler]{ Update-ControlState })
+$OpenFolderButton.Add_Click({ try { Set-UiBusy $true 'Checking and opening the selected folder...'; Clear-ProjectResolutionCache; $path=Resolve-SelectedProjectCached; Start-Process -FilePath explorer.exe -ArgumentList ('/e,"{0}"' -f $path) } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $OpenShellButton.Add_Click({ try { Set-UiBusy $true 'Checking the project and opening WSL...'; Clear-ProjectResolutionCache; $path=$null; if (Get-SelectedProjectPath) { $path=Resolve-SelectedProjectCached; [void](ConvertTo-WslProjectPath $path); [void](Add-ProjectHistory $path) }; Start-HelperTerminal -HelperMode Shell -Path $path } catch { Show-LaunchpadError $_.Exception.Message } finally { Set-UiBusy $false } })
 $LaunchButton.Add_Click({
     try {

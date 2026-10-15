@@ -83,6 +83,11 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("System.Windows.Forms.OpenFileDialog", SCRIPT)
         self.assertIn("$dialog.ValidateNames = $false", SCRIPT)
         self.assertIn("$dialog.CheckFileExists = $false", SCRIPT)
+        self.assertIn("$dialog.Filter = 'All items|*.*'", SCRIPT)
+        self.assertIn("^Select this folder(?:\\.folder)?\\.?$", SCRIPT)
+        dialog_resolution = region("function Resolve-ProjectDialogPath {", "function Refresh-Projects {")
+        self.assertLess(dialog_resolution.index("Resolve-WindowsProjectPath $Path"), dialog_resolution.index("$leaf -notmatch"))
+        self.assertIn("Resolve-WindowsProjectPath $parent", dialog_resolution)
         self.assertNotIn("System.Windows.Forms.FolderBrowserDialog", SCRIPT)
         self.assertIn("ProjectHistoryFile = Join-Path $env:LOCALAPPDATA 'NonoLaunchpad\\projects.json'", SCRIPT)
         self.assertEqual(SCRIPT.count("$ProjectHistoryLimit = 10"), 1)
@@ -96,7 +101,7 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("Move-Item -LiteralPath $temporary -Destination $Config.ProjectHistoryFile -Force", history)
         self.assertIn("uniquely named sibling temporary file", README)
         self.assertIn("at most 10 valid entries", README)
-        self.assertIn("Test-Path -LiteralPath $lexical -PathType Container", SCRIPT)
+        self.assertIn("GetFinalDirectoryPath($lexical, ([int]$Config.ProjectPathTimeoutSeconds * 1000))", SCRIPT)
         self.assertIn("$ProjectValidationText.Text = $projectMessage", SCRIPT)
 
     def test_windows_and_unc_paths_are_canonicalized_then_proved_in_wsl(self):
@@ -104,6 +109,10 @@ class LaunchpadStaticTests(unittest.TestCase):
         self.assertIn("[Environment]::ExpandEnvironmentVariables", resolver)
         self.assertIn("[IO.Path]::GetFullPath", resolver)
         self.assertIn("GetFinalDirectoryPath", resolver)
+        self.assertIn("ProjectPathTimeoutSeconds", resolver)
+        self.assertIn("Timed out while checking the project directory", SCRIPT)
+        self.assertIn("activePathTask", SCRIPT)
+        self.assertIn("waitHandle.Dispose()", SCRIPT)
         self.assertRegex(resolver, r"A-Za-z\]:\[\\\\/\].*\\\\\\\\")
         converter = region("function ConvertTo-WslProjectPath {", "function Save-ProjectHistory {")
         self.assertIn("wslpath -a -u --", converter)
@@ -206,6 +215,14 @@ class LaunchpadStaticTests(unittest.TestCase):
         ):
             self.assertIn(message, SCRIPT)
         self.assertIn("$script:UiBusy", SCRIPT)
+        state = region("function Update-ControlState {", "function Refresh-Readiness {")
+        self.assertIn("Get-ProjectInputError", state)
+        self.assertNotIn("Resolve-SelectedProjectCached", state)
+        self.assertIn("never contact a UNC share", state)
+        self.assertIn("TextBoxBase]::TextChangedEvent", SCRIPT)
+        open_folder = SCRIPT[SCRIPT.index("$OpenFolderButton.Add_Click") : SCRIPT.index("$OpenShellButton.Add_Click")]
+        self.assertIn("Set-UiBusy $true", open_folder)
+        self.assertIn("finally { Set-UiBusy $false }", open_folder)
         self.assertIn("function Clear-ProjectResolutionCache", SCRIPT)
         for action in ("$RefreshButton.Add_Click", "$CheckButton.Add_Click", "$OpenFolderButton.Add_Click", "$OpenShellButton.Add_Click"):
             handler = SCRIPT[SCRIPT.index(action) : SCRIPT.index("})", SCRIPT.index(action)) + 2]
